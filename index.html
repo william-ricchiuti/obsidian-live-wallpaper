@@ -78,8 +78,8 @@ const DEFAULTS = {
   glowBreathing: true,
   glowBreathingSpeed: 1,
   glowBreathingDepth: 0.15,
-  ambientParticles: true,
-  ambientParticleCount: 80,
+  ambientParticles: false,
+  ambientParticleCount: 40,
   ambientParticleSpeed: 0.3,
   ambientParticleSize: 1.5,
   chromaticBloom: true,
@@ -714,11 +714,14 @@ function hueShift(hex, shift) {
   return hslToHex(hsl[0], hsl[1], hsl[2]);
 }
 
-function getGlowSprite(hex, size, chromatic, chromaticIntensity) {
-  if (size === undefined) size = GLOW_SPRITE_SIZE;
+// Sprites are always rasterised at GLOW_SPRITE_SIZE and scaled by drawImage at
+// draw time. Keying the cache on the per-node draw size (which changes every
+// frame while breathing) would allocate a fresh canvas per node per frame.
+function getGlowSprite(hex, chromatic, chromaticIntensity) {
+  const size = GLOW_SPRITE_SIZE;
   if (chromatic === undefined) chromatic = false;
   if (chromaticIntensity === undefined) chromaticIntensity = 0;
-  const key = chromatic ? `${hex}-${size}-${chromaticIntensity.toFixed(1)}` : `${hex}-${size}`;
+  const key = chromatic ? `${hex}-c${chromaticIntensity.toFixed(1)}` : hex;
   let sprite = GLOW_SPRITE_CACHE.get(key);
   if (sprite) return sprite;
 
@@ -1586,18 +1589,25 @@ function drawNodes() {
   }
 
   if (glowEnabled) {
+    const chromatic = !!cfg.chromaticBloom && !REDUCED_MOTION;
+    const BREATH_PERIOD_MS = 30000;
+    const breathPhase = (performance.now() / BREATH_PERIOD_MS) * Math.PI * 2;
     for (const [color, group] of nodeGroups) {
-      const sprite = getGlowSprite(color);
       const all = group.low.length + group.high.length;
       if (!all) continue;
+      const sprite = getGlowSprite(color, chromatic, cfg.chromaticBloomIntensity);
       const render = (list) => {
         for (let i = 0; i < list.length; i++) {
           const it = list[i];
           if (it.node.ghost) continue;
           const baseGlowRadius = it.radius + 3 + Math.sqrt(it.radius); // Base glow size
           let glowRadius = baseGlowRadius * sceneTuning.glowScale * glowIntensity;
-          if (cfg.glowBreathing && !REDUCED_MOTION && simAlpha > 0.05) {
-            const breath = Math.sin(tick * 0.03 * cfg.glowBreathingSpeed + it.node.__breathOffset) * cfg.glowBreathingDepth;
+          // Breathing is meant for long idle sessions, so it must not be gated on
+          // simulation activity (simAlpha drops to ~0 once the layout settles).
+          // Wall-clock based so the ~30s cycle stays constant when the frame
+          // loop steps down to 30/15fps on a calm scene.
+          if (cfg.glowBreathing && !REDUCED_MOTION) {
+            const breath = Math.sin(breathPhase * cfg.glowBreathingSpeed + it.node.__breathOffset) * cfg.glowBreathingDepth;
             glowRadius *= (1 + breath);
           }
           if (glowRadius <= 0) continue;
@@ -1606,7 +1616,7 @@ function drawNodes() {
           if (glowAlpha <= 0) continue;
           ctx.globalAlpha = Math.min(1, glowAlpha);
           const size = glowRadius * 2;
-          const sprite = getGlowSprite(color, size, cfg.chromaticBloom && !REDUCED_MOTION, cfg.chromaticBloomIntensity);
+          ctx.drawImage(sprite, it.px - glowRadius, it.py - glowRadius, size, size);
         }
       };
       render(group.low);

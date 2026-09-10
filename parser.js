@@ -950,10 +950,27 @@ async function startApp(options = {}) {
   };
 
   const AWAIT_WRITE_FINISH_MS = 300;
-  const chokidarIgnores = [/(^|[/\\])\./, /\.(?!md$)[^.]+$/];
+  // Skip dotfiles/dot-directories, and any *file* whose extension is not .md.
+  // The extension check must not fire on directories (e.g. "notes.v2"), or
+  // chokidar silently never descends into them while the scan still does.
+  const chokidarIgnores = [
+    /(^|[/\\])\./,
+    (filePath, stats) => {
+      // chokidar calls this once without stats and again with them; only
+      // decide when we know it is a file (applyFsEventToState filters .md anyway).
+      if (!stats || !stats.isFile()) return false;
+      return path.extname(filePath).toLowerCase() !== '.md';
+    },
+  ];
   if (state.cfg.ignorePaths && state.cfg.ignorePaths.length) {
-    const prefix = path.resolve(state.cfg.vaultPath) + path.sep;
-    chokidarIgnores.push(filePath => isIgnoredPath(filePath, prefix, state.cfg.ignorePaths));
+    const vaultRoot = path.resolve(state.cfg.vaultPath);
+    chokidarIgnores.push(filePath => {
+      // chokidar calls the ignore callback on the watch root itself first;
+      // isIgnoredPath treats an empty relative path as outside the vault, so
+      // guard the root explicitly or the whole watch is discarded.
+      if (path.resolve(filePath) === vaultRoot) return false;
+      return isIgnoredPath(filePath, vaultRoot, state.cfg.ignorePaths);
+    });
   }
   const watcher = chokidar.watch(state.cfg.vaultPath, {
     ignoreInitial: true,

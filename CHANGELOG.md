@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.1.1] - 2026-09-10
+
+### Fixed
+- **Node glow was not drawn.** The v1.1 refactor built a glow sprite per node but dropped the `drawImage` call, so every glow preset (and chromatic bloom, which lives in the same sprite) rendered flat. Restored. Sprites are now rasterised once per color at a fixed size and scaled on draw; the previous cache key included the per-frame breathing size, so each node allocated a fresh canvas every frame.
+- **Glow breathing stopped once the layout settled.** It was gated on simulation activity; it now runs on a wall-clock ~30s cycle regardless of frame rate.
+- **Live updates silently disabled whenever `ignorePaths` was non-empty** (which `config.example.json` ships with). The ignore callback fired on the vault root itself and chokidar discarded the whole watch. Added a real watcher test to `npm test`.
+- **Directories with a dot in the name (e.g. `notes.v2`) were scanned but never watched.** The non-`.md` extension filter now only applies to files.
+- `themes/` was missing from the npm `files` list, so `npx obsidian-live-wallpaper` 404'd every theme script.
+- `ambientParticles` default documented as `true`/80 in README and the renderer's fallback defaults; the server default is `false`/40. Aligned.
+- `package.json` version was still 1.0.0.
+
 ## [1.1.0] - 2026-07-09
 
 ### Added

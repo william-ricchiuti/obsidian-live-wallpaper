@@ -15,7 +15,8 @@ const {
   scanVaultEntries,
   extractTag,
   extractWikilinks,
-  isIgnoredPath
+  isIgnoredPath,
+  startApp
 } = require('../parser.js');
 const core = require('../renderer-core.js');
 
@@ -509,6 +510,56 @@ async function runIgnorePathsIntegration(tmpRoot) {
     `expected only Alpha to survive ignorePaths filtering, got [${basenames.join(', ')}]`);
 }
 
+// Exercises the real chokidar watcher (not just applyFsEventToState): with a
+// non-empty ignorePaths, the ignore callback used to fire on the vault root
+// itself and silently disable every live update. Also covers directories with
+// a dot in the name, which the old extension regex kept chokidar from entering.
+async function runLiveWatcherWithIgnorePaths(tmpRoot) {
+  const vaultDir = path.join(tmpRoot, 'live-vault');
+  writeFile(path.join(vaultDir, 'Alpha.md'), '# Alpha\n');
+  writeFile(path.join(vaultDir, 'templates', 'Template.md'), '# Template\n');
+  fs.mkdirSync(path.join(vaultDir, 'notes.v2'), { recursive: true });
+  const configPath = path.join(tmpRoot, 'live-config.json');
+  writeJson(configPath, { vaultPath: vaultDir, port: 3998, ignorePaths: ['templates', '.obsidian'] });
+
+  const app = await startApp({ configPath, outPath: path.join(tmpRoot, 'live-graph.json') });
+  const waitForVersion = async (above, timeoutMs) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (app.state.graphVersion > above) return true;
+      await new Promise(r => setTimeout(r, 100));
+    }
+    return false;
+  };
+  try {
+    await new Promise((resolve, reject) => {
+      app.watcher.once('ready', resolve);
+      setTimeout(() => reject(new Error('watcher never became ready')), 5000);
+    });
+
+    let before = app.state.graphVersion;
+    writeFile(path.join(vaultDir, 'Beta.md'), '# Beta\n[[Alpha]]\n');
+    assert(await waitForVersion(before, 4000),
+      'expected a new top-level note to bump graphVersion via the live watcher when ignorePaths is set');
+
+    before = app.state.graphVersion;
+    writeFile(path.join(vaultDir, 'notes.v2', 'Gamma.md'), '# Gamma\n');
+    assert(await waitForVersion(before, 4000),
+      'expected a note inside a dot-named directory (notes.v2) to be watched');
+
+    before = app.state.graphVersion;
+    writeFile(path.join(vaultDir, 'templates', 'Ignored.md'), '# Ignored\n');
+    assert(!(await waitForVersion(before, 1200)),
+      'expected a note under an ignorePaths folder to NOT bump graphVersion');
+  } finally {
+    process.removeAllListeners('SIGINT');
+    process.removeAllListeners('SIGTERM');
+    await app.watcher.close();
+    await app.configWatcher.close();
+    await new Promise(r => app.server.close(r));
+  }
+}
+
 async function runSymlinkCycleGuard(tmpRoot) {
   const vaultDir = path.join(tmpRoot, 'symlink-vault');
   writeFile(path.join(vaultDir, 'Alpha.md'), '# Alpha\n');
@@ -661,6 +712,7 @@ async function main() {
     await runDocsRouteGuard();
     await run413BodyTooLarge(tmpRoot);
     await runIgnorePathsIntegration(tmpRoot);
+    await runLiveWatcherWithIgnorePaths(tmpRoot);
     await runSymlinkCycleGuard(tmpRoot);
     await runEaddrinuse(tmpRoot);
     console.log('smoke: ok');

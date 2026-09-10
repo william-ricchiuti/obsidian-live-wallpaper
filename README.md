@@ -190,8 +190,8 @@ The renderer ships with a local vendored copy of D3, so the wallpaper still work
 | `glowBreathing` | `true` | Nodes slowly pulse over ~30s cycles |
 | `glowBreathingSpeed` | `1` | Breathing cycle speed multiplier (`0.1`–`3`) |
 | `glowBreathingDepth` | `0.15` | Maximum glow radius swell (`0`–`0.4`) |
-| `ambientParticles` | `true` | Free-floating atmospheric particles independent of the graph |
-| `ambientParticleCount` | `80` | Number of ambient particles (`0`–`300`) |
+| `ambientParticles` | `false` | Free-floating atmospheric particles independent of the graph |
+| `ambientParticleCount` | `40` | Number of ambient particles (`0`–`300`) |
 | `ambientParticleSpeed` | `0.3` | Ambient particle drift speed (`0.05`–`2`) |
 | `ambientParticleSize` | `1.5` | Ambient particle base radius in px (`0.5`–`4`) |
 | `chromaticBloom` | `true` | Bright nodes bloom into hue-shifted outer halos |
@@ -199,7 +199,7 @@ The renderer ships with a local vendored copy of D3, so the wallpaper still work
 | `depthParallax` | `true` | Render nodes in depth layers with independent motion |
 | `depthParallaxStrength` | `0.5` | Layer separation intensity (`0`–`1`) |
 | `depthParallaxLayers` | `3` | Number of depth layers (`2`–`4`) |
-| `theme` | `\"default\"` | Rendering engine: `default`, `celestial`, `sketch`, `wash`, or `stained-glass` |
+| `theme` | `"default"` | Rendering engine: `default`, `celestial`, `sketch`, `wash`, or `stained-glass` |
 | `labelStyle` | *(see presets)* | Per-preset label styling object with `mode`, `glowColor`, `chromaticSplit`, `fontStyle` |
 
 ### Tags vs links

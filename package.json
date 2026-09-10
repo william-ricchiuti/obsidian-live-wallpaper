@@ -1,6 +1,6 @@
 {
   "name": "obsidian-live-wallpaper",
-  "version": "1.0.0",
+  "version": "1.1.1",
   "description": "Your Obsidian vault graph as a live desktop wallpaper",
   "author": "William Ricchiuti",
   "homepage": "https://github.com/willytop8/obsidian-live-wallpaper#readme",
@@ -26,6 +26,7 @@
     "macos-setup.md",
     "windows-setup.md",
     "vendor/",
+    "themes/",
     "scripts/find-chrome.js",
     "scripts/screenshot-presets.js",
     "docs/presets/"
