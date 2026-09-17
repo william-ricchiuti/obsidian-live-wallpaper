@@ -8,7 +8,7 @@
 ## Install
 
 ```powershell
-git clone https://github.com/willytop8/obsidian-live-wallpaper.git
+git clone https://github.com/william-ricchiuti/obsidian-live-wallpaper.git
 cd obsidian-live-wallpaper
 npm install
 copy config.example.json config.json

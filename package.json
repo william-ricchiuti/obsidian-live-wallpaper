@@ -3,10 +3,10 @@
   "version": "1.1.1",
   "description": "Your Obsidian vault graph as a live desktop wallpaper",
   "author": "William Ricchiuti",
-  "homepage": "https://github.com/willytop8/obsidian-live-wallpaper#readme",
+  "homepage": "https://github.com/william-ricchiuti/obsidian-live-wallpaper#readme",
   "repository": {
     "type": "git",
-    "url": "https://github.com/willytop8/obsidian-live-wallpaper.git"
+    "url": "https://github.com/william-ricchiuti/obsidian-live-wallpaper.git"
   },
   "files": [
     "LICENSE",

@@ -5,7 +5,7 @@ Thanks for your interest in improving Obsidian Live Wallpaper.
 ## Development setup
 
 ```bash
-git clone https://github.com/willytop8/obsidian-live-wallpaper.git
+git clone https://github.com/william-ricchiuti/obsidian-live-wallpaper.git
 cd obsidian-live-wallpaper
 npm install
 cp config.example.json config.json   # then set vaultPath

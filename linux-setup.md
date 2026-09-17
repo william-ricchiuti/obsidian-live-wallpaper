@@ -10,7 +10,7 @@ Linux has no single wallpaper engine, but the parser and renderer work identical
 ## Install
 
 ```bash
-git clone https://github.com/willytop8/obsidian-live-wallpaper.git
+git clone https://github.com/william-ricchiuti/obsidian-live-wallpaper.git
 cd obsidian-live-wallpaper
 npm install
 cp config.example.json config.json

@@ -1,6 +1,6 @@
 # Obsidian Live Wallpaper
 
-[![CI](https://github.com/willytop8/obsidian-live-wallpaper/actions/workflows/ci.yml/badge.svg)](https://github.com/willytop8/obsidian-live-wallpaper/actions/workflows/ci.yml)
+[![CI](https://github.com/william-ricchiuti/obsidian-live-wallpaper/actions/workflows/ci.yml/badge.svg)](https://github.com/william-ricchiuti/obsidian-live-wallpaper/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%E2%89%A520-43853d.svg)](https://nodejs.org)
 
@@ -95,7 +95,7 @@ point your wallpaper host at the printed `http://127.0.0.1:3000` URL.
 **Or clone it** (best if you want to customize or contribute):
 
 ```bash
-git clone https://github.com/willytop8/obsidian-live-wallpaper.git
+git clone https://github.com/william-ricchiuti/obsidian-live-wallpaper.git
 cd obsidian-live-wallpaper
 npm install
 cp config.example.json config.json
