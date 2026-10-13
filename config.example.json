@@ -30,7 +30,11 @@
   "lightAccent": "#39407a",
   "lightBackground": "#ece6d6",
   "maxRenderedNodes": 5000,
-  "ignorePaths": [".obsidian", "templates", "_archive"],
+  "ignorePaths": [
+    ".obsidian",
+    "templates",
+    "_archive"
+  ],
   "tagColors": {},
   "glowBreathing": true,
   "glowBreathingSpeed": 1.0,
@@ -44,5 +48,34 @@
   "depthParallax": true,
   "depthParallaxStrength": 0.5,
   "depthParallaxLayers": 3,
-  "theme": "default"
+  "theme": "default",
+  "labelStyle": {},
+  "layout": "force",
+  "framing": "center",
+  "zoom": 1,
+  "offsetX": 0,
+  "offsetY": 0,
+  "safeArea": {
+    "top": 0,
+    "right": 0,
+    "bottom": 0,
+    "left": 0
+  },
+  "palette": "auto",
+  "recencyDays": 7,
+  "timeOfDay": "off",
+  "tagShapes": false,
+  "grain": true,
+  "vignette": false,
+  "overlay": "none",
+  "labelSource": "hubs",
+  "focusNote": "",
+  "focusHops": 2,
+  "rotate": {
+    "themes": [],
+    "everyMinutes": 60
+  },
+  "maxFps": 30,
+  "idleFps": 10,
+  "renderer": "auto"
 }
