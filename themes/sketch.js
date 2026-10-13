@@ -1,3 +1,6 @@
+// @name Sketchbook
+// @description Pencil on ruled paper: wobbly hand-drawn links and circled notes.
+// @light
 // themes/sketch.js — Hand-drawn sketchbook theme.
 // Loaded as plain <script> after registry.js; THEMES is a global.
 // Uses globals: cfg, nodes, links, ctx, canvas, sceneTuning, tick, innerWidth, innerHeight,
@@ -17,6 +20,7 @@
   }
 
   THEMES.sketch = {
+    kind: 'hooks', name: 'Sketchbook', dark: false, background: '#f5f0e8',
     drawBackground: function () {
       // Cream paper
       ctx.fillStyle = '#f5f0e8';

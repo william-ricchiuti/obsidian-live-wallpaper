@@ -1,3 +1,6 @@
+// @name Ink Wash
+// @description Watercolour on paper: pigment bleeds around each note and links are soft brush strokes.
+// @light
 // themes/wash.js — Ink Wash / Watercolor theme.
 // Loaded as plain <script> after registry.js; THEMES is a global.
 // Uses globals: cfg, nodes, links, ctx, canvas, sceneTuning, tick, innerWidth, innerHeight,
@@ -8,10 +11,12 @@
   'use strict';
 
   let paperTexture = null;
+  const BLEED = 0.6; // pigment bleed radius multiplier
 
+  // Rebuilt when the window size changes (it used to stay at the first size).
   function ensurePaperTexture() {
-    if (paperTexture) return;
-    const w = innerWidth, h = innerHeight;
+    const w = Math.max(1, innerWidth | 0), h = Math.max(1, innerHeight | 0);
+    if (paperTexture && paperTexture.width === w && paperTexture.height === h) return;
     const tex = document.createElement('canvas');
     tex.width = w; tex.height = h;
     const g = tex.getContext('2d');
@@ -26,21 +31,20 @@
   }
 
   THEMES.wash = {
+    kind: 'hooks', name: 'Ink Wash', dark: false, background: '#f0efe8',
     drawBackground: function () {
       ctx.fillStyle = cfg.background || '#f0efe8';
       ctx.fillRect(0, 0, innerWidth, innerHeight);
 
       // Paper texture overlay
-      if (cfg.ambientParticles || true) { // always apply subtle texture in wash theme
-        ensurePaperTexture();
-        ctx.save();
-        ctx.globalAlpha = 0.06;
-        ctx.globalCompositeOperation = 'multiply';
-        ctx.drawImage(paperTexture, 0, 0);
-        ctx.globalCompositeOperation = 'source-over';
-        ctx.globalAlpha = 1;
-        ctx.restore();
-      }
+      ensurePaperTexture();
+      ctx.save();
+      ctx.globalAlpha = 0.06;
+      ctx.globalCompositeOperation = 'multiply';
+      ctx.drawImage(paperTexture, 0, 0);
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.globalAlpha = 1;
+      ctx.restore();
     },
 
     drawEdges: function () {
@@ -70,14 +74,11 @@
 
         ctx.strokeStyle = rgba(r, g, b, alpha * 0.4);
         ctx.lineWidth = 1.8 + importance * 1.2;
-        ctx.shadowBlur = 2;
-        ctx.shadowColor = rgba(r, g, b, alpha * 0.15);
         ctx.beginPath();
         ctx.moveTo(x1, y1);
         ctx.quadraticCurveTo(mx, my, x2, y2);
         ctx.stroke();
       }
-      ctx.shadowBlur = 0;
     },
 
     drawParticles: function () {
@@ -105,11 +106,10 @@
         const x = node.__fx, y = node.__fy;
         const radius = node.r || 3;
         const color = nodeColor(node);
-        const importance = node.importance || 0;
         const [r, g, b] = hexToRGB(color);
 
         // Pigment bleed: 4 overlapping offset circles
-        const bleedIntensity = (cfg.washBleedIntensity !== undefined ? cfg.washBleedIntensity : 0.6);
+        const bleedIntensity = BLEED;
         const offsets = [[0, 0, 1], [1.2, -0.7, 0.5], [-1.0, 0.8, 0.35], [0.4, 1.0, 0.2]];
         for (let j = 0; j < offsets.length; j++) {
           const [ox, oy, am] = offsets[j];
