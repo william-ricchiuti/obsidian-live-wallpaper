@@ -70,7 +70,10 @@ function createMockResponse() {
     writableEnded: false,
     writeHead(statusCode, headers = {}) {
       this.statusCode = statusCode;
-      this.headers = headers;
+      this.headers = { ...this.headers, ...headers };
+    },
+    setHeader(name, value) {
+      this.headers[name] = value;
     },
     write(chunk = '') {
       this.body += chunk;

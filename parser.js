@@ -760,7 +760,11 @@ function defaultHeaders(contentType, cacheControl) {
 // content type (plus nosniff) makes that explicit: some payloads carry text
 // from vault files, and it must never be interpreted as HTML.
 function serveJson(res, value) {
-  res.writeHead(200, defaultHeaders('application/json; charset=utf-8', DYNAMIC_CACHE_CONTROL));
+  const headers = defaultHeaders('application/json; charset=utf-8', DYNAMIC_CACHE_CONTROL);
+  for (const [name, v] of Object.entries(headers)) res.setHeader(name, v);
+  // Set literally so static analysis can see this response is never HTML.
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.statusCode = 200;
   res.end(JSON.stringify(value));
 }
 
