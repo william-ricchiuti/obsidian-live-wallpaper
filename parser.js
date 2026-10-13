@@ -142,11 +142,15 @@ const THEME_NAMES = new Set(THEME_LIST.map(t => t.id));
 // [[target]] / [[target|alias]] / [[target#heading]]. A leading "!" marks an
 // embed; embeds of non-markdown files (images, PDFs, audio) are attachments,
 // not note links, and must not become ghost nodes.
-const WIKILINK = /(!?)\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]/g;
+// Character classes exclude "[" so an unclosed "[[" can't make the scan
+// quadratic (CodeQL js/polynomial-redos).
+const WIKILINK = /(!?)\[\[([^[\]|#]+)(?:[|#][^[\]]*)?\]\]/g;
 const NON_NOTE_EXT = /\.(png|jpe?g|gif|webp|svg|bmp|avif|heic|pdf|mp3|mp4|m4a|wav|ogg|webm|mov|canvas|excalidraw|base|csv|zip)$/i;
 const FRONTMATTER = /^---\r?\n([\s\S]*?)\r?\n---/;
 const TAGS_FLOW = /^tags:\s*\[([^\]]*)\]/m;
-const TAGS_BLOCK = /^tags:\s*\r?\n((?:\s*-\s+.+\r?\n?)+)/m;
+// [ \t] rather than \s so the pattern can't backtrack across newlines
+// (CodeQL js/polynomial-redos on files with many "\n " repetitions).
+const TAGS_BLOCK = /^tags:[ \t]*\r?\n((?:[ \t]*-[ \t]+.+\r?\n?)+)/m;
 const TAGS_INLINE = /(?:^|\s)#([a-zA-Z][\w-/]*)/g;
 // vendor/d3.min.js is pinned by npm version and never changes without a
 // reinstall, so it's safe to cache long. worker.js/renderer-core.js are our
@@ -745,7 +749,10 @@ function defaultHeaders(contentType, cacheControl) {
     'Cache-Control': cacheControl,
     'Cross-Origin-Opener-Policy': 'same-origin',
     'Cross-Origin-Embedder-Policy': 'require-corp',
-    'Cross-Origin-Resource-Policy': 'same-origin'
+    'Cross-Origin-Resource-Policy': 'same-origin',
+    // Never let a browser sniff a JSON or text response (some carry note
+    // text) into HTML.
+    'X-Content-Type-Options': 'nosniff'
   };
 }
 
@@ -1061,7 +1068,10 @@ function createRequestHandler(state) {
         return;
       }
       const note = await pickNoteOfHour(state, requestUrl.searchParams.get('hour'));
-      serveBuffer(res, JSON.stringify(note), 'application/json');
+      // Note text is only ever sent as JSON (with nosniff); the renderer
+      // inserts it with HTML escaping.
+      res.writeHead(200, defaultHeaders('application/json; charset=utf-8', DYNAMIC_CACHE_CONTROL));
+      res.end(JSON.stringify(note));
       return;
     }
 
