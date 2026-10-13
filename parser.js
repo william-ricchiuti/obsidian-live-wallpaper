@@ -843,6 +843,9 @@ async function rebuildGraphState(state, options = {}) {
   });
   state.discoveredTags = result.discoveredTags;
   state.graphJson = serializeGraph(result);
+  // Content hash, not the version counter: versions restart at 1 when the
+  // server restarts, so a version-based ETag could match different content.
+  state.graphEtag = `"g${hashString(state.graphJson).toString(36)}-${state.graphJson.length}"`;
   state.graphGzip = null; // compressed lazily per version
   state.graphVersion = (state.graphVersion || 0) + 1;
   state.realNoteIds = result.nodes.filter(n => !n.ghost).map(n => n.id);
@@ -912,6 +915,18 @@ function hashString(s) {
   return h >>> 0;
 }
 
+// Reads at most `limit` bytes: an excerpt never needs a whole (possibly huge) file.
+async function readHead(filePath, limit) {
+  const fh = await fs.promises.open(filePath, 'r');
+  try {
+    const buf = Buffer.alloc(limit);
+    const { bytesRead } = await fh.read(buf, 0, limit, 0);
+    return buf.subarray(0, bytesRead).toString('utf8');
+  } finally {
+    await fh.close();
+  }
+}
+
 async function pickNoteOfHour(state, hourParam) {
   const ids = state.realNoteIds || [];
   const entries = state.entries ? Array.from(state.entries.values()) : [];
@@ -923,7 +938,7 @@ async function pickNoteOfHour(state, hourParam) {
   for (let attempt = 0; attempt < 8; attempt++) {
     const entry = sorted[hashString(hourKey + ':' + attempt) % sorted.length];
     let content;
-    try { content = await fs.promises.readFile(entry.path, 'utf8'); } catch (_) { continue; }
+    try { content = await readHead(entry.path, 64 * 1024); } catch (_) { continue; }
     const excerpt = noteExcerpt(content);
     if (excerpt.length < 24 && attempt < 7) continue;
     const rel = path.relative(state.cfg.vaultPath, entry.path);
@@ -957,8 +972,8 @@ async function handleCustomPresets(state, req, res, requestUrl) {
     res.writeHead(code, defaultHeaders('application/json', DYNAMIC_CACHE_CONTROL));
     res.end(JSON.stringify(body));
   };
-  if (req.method === 'GET') return json(200, readCustomPresets(state));
   if (!isTrustedHost(req.headers.host)) return json(403, { error: 'untrusted Host header' });
+  if (req.method === 'GET') return json(200, readCustomPresets(state));
   try {
     if (req.method === 'POST') {
       if (req.headers['content-type'] !== 'application/json') return json(415, { error: 'Content-Type must be application/json' });
@@ -1039,6 +1054,12 @@ function createRequestHandler(state) {
     // One note per clock hour, picked deterministically so every screen agrees.
     // Reads the file on demand rather than shipping excerpts in graph.json.
     if (url === '/api/note-of-hour' && req.method === 'GET') {
+      // Returns note text, so it gets the same DNS-rebinding guard as writes.
+      if (!isTrustedHost(req.headers.host)) {
+        res.writeHead(403, defaultHeaders('application/json', DYNAMIC_CACHE_CONTROL));
+        res.end(JSON.stringify({ error: 'untrusted Host header' }));
+        return;
+      }
       const note = await pickNoteOfHour(state, requestUrl.searchParams.get('hour'));
       serveBuffer(res, JSON.stringify(note), 'application/json');
       return;
@@ -1096,7 +1117,7 @@ function createRequestHandler(state) {
         : JSON.stringify({ nodes: [], links: [] }));
       // ETag per graph version: a client that already has this version gets a
       // 304 instead of re-downloading a multi-megabyte graph.
-      const etag = `"g${state.graphVersion || 0}-${graphJson.length}"`;
+      const etag = state.graphJson ? state.graphEtag || `"g${hashString(graphJson).toString(36)}-${graphJson.length}"` : `"g0-${graphJson.length}"`;
       if (req.headers['if-none-match'] === etag) {
         res.writeHead(304, { ...defaultHeaders('application/json', DYNAMIC_CACHE_CONTROL), ETag: etag });
         res.end();

@@ -496,13 +496,17 @@ function buildFields() {
 
 // Push cfg into every control. The focused control is left alone so an
 // SSE-triggered refresh never clobbers what the user is typing.
-function applyForm(force) {
+// force: overwrite every control. revertKeys: top-level keys whose controls
+// must be reset even if focused (a rejected save); other focused text fields
+// keep what the user is typing.
+function applyForm(force, revertKeys) {
   const active = force ? null : document.activeElement;
+  const mustRevert = k => !!revertKeys && revertKeys.has(String(k).split('.')[0]);
   FIELDS.forEach(f => {
     const el = $(fid(f.k));
     if (!el) return;
     const v = getPath(cfg, f.k);
-    const skip = el === active && (f.t === 'text' || f.t === 'int');
+    const skip = el === active && (f.t === 'text' || f.t === 'int') && !mustRevert(f.k);
     if (f.t === 'toggle') el.checked = v === true;
     else if (f.t === 'range') {
       const n = typeof v === 'number' ? v : (f.unsetValue !== undefined ? f.unsetValue : f.min);
@@ -527,11 +531,11 @@ function applyForm(force) {
   // Safe area
   const sa = cfg.safeArea || {};
   document.querySelectorAll('.safe-grid input').forEach(inp => {
-    if (inp !== active) inp.value = sa[inp.dataset.side] ?? 0;
+    if (inp !== active || mustRevert('safeArea')) inp.value = sa[inp.dataset.side] ?? 0;
   });
   // Ignore paths
   const ip = $('ignorePaths');
-  if (ip !== active) ip.value = (cfg.ignorePaths || []).join('\n');
+  if (ip !== active || mustRevert('ignorePaths')) ip.value = (cfg.ignorePaths || []).join('\n');
   // Rotation themes
   const rot = (cfg.rotate && cfg.rotate.themes) || [];
   document.querySelectorAll('#rotateThemes input').forEach(cb => { cb.checked = rot.includes(cb.value); });
@@ -575,7 +579,8 @@ async function save(updates) {
     return true;
   } catch (e) {
     status(e.message || 'Save failed', 'err');
-    applyForm(true); // revert every control (even the focused one) to the last good config
+    // Revert only the rejected keys (even if focused); leave other in-progress edits alone.
+    applyForm(false, new Set(Object.keys(updates || {})));
     return false;
   } finally {
     inflight--;
@@ -936,11 +941,11 @@ document.addEventListener('keydown', e => {
   if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S')) {
     e.preventDefault();
     const a = document.activeElement;
-    // Commit a pending text edit first (blur fires its 'change' synchronously,
-    // which starts a save). Only re-save the whole config if nothing was pending,
-    // so a stale full save can't race and overwrite the edit.
+    // Every control saves on change, so Ctrl/Cmd+S only commits a pending text
+    // edit (blur fires its 'change'). Re-posting the whole config would let one
+    // key the server rejects fail the entire save.
     if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA')) a.blur();
-    if (inflight === 0 && Object.keys(cfg).length) save(exportableConfig());
+    if (inflight === 0) status('All changes are saved', 'ok');
   }
   if (e.key === 'Escape') {
     $('status').className = 'status';

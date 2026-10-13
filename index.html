@@ -1409,6 +1409,7 @@ function ensureSimWorker() {
     if (!msg) return;
     if (msg.generation !== simGeneration) return; // stale tick from previous graph
     if (msg.type !== 'tick' && msg.type !== 'stopped') return;
+    lastSimMessageAt = performance.now();
     if (msg.buffer) {
       const buf = new Float32Array(msg.buffer);
       const len = Math.min(nodes.length, (msg.count | 0) || (buf.length >> 1));
@@ -1432,9 +1433,38 @@ function ensureSimWorker() {
       wake();
     }
   };
-  simWorker.onerror = (err) => { console.warn('sim worker error:', err.message || err); };
+  simWorker.onerror = (err) => {
+    console.warn('sim worker error:', err.message || err);
+    recoverFromWorkerFailure();
+  };
   return simWorker;
 }
+
+// If the worker dies (failed to load, threw mid-run) no 'stopped' message
+// ever arrives and simRunning would keep the page at full frame rate forever.
+// Fall back to settling on the main thread.
+let simWatchdog = null;
+function recoverFromWorkerFailure() {
+  if (simWatchdog) { clearTimeout(simWatchdog); simWatchdog = null; }
+  try { if (simWorker) simWorker.terminate(); } catch (_) {}
+  simWorker = null;
+  if (!simRunning) return;
+  simSharedEnabled = false;
+  simSharedPositions = null;
+  try { settleSynchronously(Math.max(0.3, simAlpha || 1)); } catch (e) { simRunning = false; }
+  simRunning = false;
+  sceneDirty = true;
+  markConfigChanged();
+}
+function armSimWatchdog() {
+  if (simWatchdog) clearTimeout(simWatchdog);
+  simWatchdog = setTimeout(() => {
+    simWatchdog = null;
+    if (simRunning && performance.now() - lastSimMessageAt > 15000) recoverFromWorkerFailure();
+    else if (simRunning) armSimWatchdog();
+  }, 16000);
+}
+let lastSimMessageAt = 0;
 
 // Starts (or warm-restarts) the layout. alpha < 1 keeps the existing layout
 // and only lets it relax around what changed.
@@ -1475,6 +1505,8 @@ function startSimulation(alpha) {
     centerX: innerWidth / 2,
     centerY: innerHeight / 2
   });
+  lastSimMessageAt = performance.now();
+  armSimWatchdog();
   framingDirty = true;
   markConfigChanged();
   invalidateStaticLayer();
@@ -1513,8 +1545,11 @@ async function fetchGraph() {
     if (!res.ok) return null;
     const etag = res.headers.get('ETag') || '';
     if (etag && etag === lastGraphEtag && nodes.length) return 'unchanged';
-    lastGraphEtag = etag;
-    return await res.json();
+    const graph = await res.json();
+    // Remembered only once the graph is actually applied (end of loadGraph),
+    // so a failed parse can't pin a stale graph behind a matching ETag.
+    if (graph) graph.__etag = etag;
+    return graph;
   } catch (e) {
     return null;
   }
@@ -1622,6 +1657,7 @@ async function loadGraph() {
       startSimulation(warm ? 0.25 : 1);
     }
     sceneDirty = true;
+    if (graph.__etag) lastGraphEtag = graph.__etag;
     markConfigChanged();
   } catch (error) {
     console.warn('load failed:', error.message);
@@ -2436,10 +2472,12 @@ let loopScheduled = false;
 let loopTimer = null;
 let lastFrameAt = 0;
 function wake() {
-  if (loopScheduled || ONESHOT) return;
+  if (ONESHOT) return;
   if (SYNTHETIC_SIZE > 0 && !__bootDone) return;
+  // A pending low-fps idle timer is pre-empted so changes show immediately.
+  if (loopTimer) { clearTimeout(loopTimer); loopTimer = null; loopScheduled = false; }
+  if (loopScheduled) return;
   loopScheduled = true;
-  if (loopTimer) { clearTimeout(loopTimer); loopTimer = null; }
   requestAnimationFrame(frameLoop);
 }
 
@@ -2451,31 +2489,46 @@ function targetFps() {
   return Math.min(max, cfg.idleFps | 0);
 }
 
+let __lastDrawError = 0;
 function frameLoop(now) {
   loopScheduled = false;
   if (document.hidden && !EXPORT_MODE) return; // visibilitychange calls wake()
   const fps = targetFps();
   const dt = lastFrameAt ? Math.min(250, now - lastFrameAt) : 16.67;
-  // rAF can run faster than the cap; skip frames that come too early.
-  if (fps > 0 && fps < 58 && lastFrameAt && now - lastFrameAt < 1000 / fps - 2) {
+  // rAF runs at the display rate (often 120/144 Hz); skip frames that come
+  // earlier than the cap allows, at every cap including 60.
+  if (fps > 0 && lastFrameAt && now - lastFrameAt < 1000 / fps - 2) {
     scheduleNext(fps, now);
     return;
   }
   lastFrameAt = now;
   const t0 = performance.now();
-  spawnParticles(now);
-  updateParticles(dt / 16.67);
-  updateAmbientParticles(dt / 16.67);
-  draw();
+  let failed = false;
+  try {
+    spawnParticles(now);
+    updateParticles(dt / 16.67);
+    updateAmbientParticles(dt / 16.67);
+    draw();
+  } catch (e) {
+    // A throwing theme must not freeze the wallpaper: log (rate-limited) and
+    // keep the loop alive at a low rate so a later config change can recover.
+    failed = true;
+    if (now - __lastDrawError > 10000) { __lastDrawError = now; console.warn('draw failed:', e && e.message ? e.message : e); }
+    try { ctx.restore(); } catch (_) {}
+    ctx.setTransform(renderScale, 0, 0, renderScale, 0, 0);
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+  }
   if (PERF_ENABLED) { __perfRecord('frame', performance.now() - t0); __perfFrame(); }
-  scheduleNext(targetFps(), now);
+  const next = targetFps();
+  scheduleNext(failed ? Math.max(1, Math.min(next || 1, 2)) : next, now);
 }
 
 function scheduleNext(fps, now) {
   if (fps <= 0) return; // hold: nothing changes until wake()
   loopScheduled = true;
-  if (fps >= 58) { requestAnimationFrame(frameLoop); return; }
-  const delay = Math.max(0, 1000 / fps - (performance.now() - now) - 4);
+  const delay = 1000 / fps - (performance.now() - now) - 4;
+  if (delay <= 8) { requestAnimationFrame(frameLoop); return; }
   loopTimer = setTimeout(() => { loopTimer = null; requestAnimationFrame(frameLoop); }, delay);
 }
 
@@ -2484,9 +2537,17 @@ document.addEventListener('visibilitychange', () => {
 });
 
 // Clock-driven changes: theme rotation and time-of-day tint/palette.
+let __lastDayKey = dayKey();
 setInterval(() => {
   if (ONESHOT || SYNTHETIC_SIZE > 0) return;
   reapplyEffectiveConfig(false);
+  // focusNote 'today' (and recency colours) depend on the date.
+  const today = dayKey();
+  if (today !== __lastDayKey) {
+    __lastDayKey = today;
+    refreshSceneTuning();
+    markConfigChanged();
+  }
 }, 30000);
 
 // ---------------------------------------------------------------------------

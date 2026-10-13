@@ -810,7 +810,9 @@ async function runNewRoutes(tmpRoot) {
   const themes = JSON.parse((await runHandler(handler, 'GET', '/api/themes')).body);
   assert(themes.some(t => t.id === 'aurora'), 'expected /api/themes to list discovered themes');
 
-  const note = JSON.parse((await runHandler(handler, 'GET', '/api/note-of-hour?hour=123')).body);
+  const rebinding = await runHandler(handler, 'GET', '/api/note-of-hour?hour=123', undefined, { host: 'evil.example:4321' });
+  assert(rebinding.statusCode === 403, 'note-of-hour must refuse untrusted Host headers (DNS rebinding)');
+  const note = JSON.parse((await runHandler(handler, 'GET', '/api/note-of-hour?hour=123', undefined, host)).body);
   assert(note.title === 'Alpha' || note.title === 'Beta', `expected a note of the hour, got ${JSON.stringify(note)}`);
   assert(note.excerpt.length > 20 && !note.excerpt.includes('[['), 'expected a plain-text excerpt');
 
@@ -822,7 +824,7 @@ async function runNewRoutes(tmpRoot) {
 
   const save = await runHandler(handler, 'POST', '/api/custom-presets', JSON.stringify({ name: 'Mine', config: { accent: '#112233', theme: 'metro' } }), { ...host, 'content-type': 'application/json' });
   assert(save.statusCode === 200, `expected custom preset save to succeed, got ${save.statusCode} ${save.body}`);
-  const list = JSON.parse((await runHandler(handler, 'GET', '/api/custom-presets')).body);
+  const list = JSON.parse((await runHandler(handler, 'GET', '/api/custom-presets', undefined, host)).body);
   assert(list.length === 1 && list[0].config.theme === 'metro', 'expected the custom preset to persist');
   const bad = await runHandler(handler, 'POST', '/api/custom-presets', JSON.stringify({ name: 'Bad', config: { theme: 'nope' } }), { ...host, 'content-type': 'application/json' });
   assert(bad.statusCode === 400, 'expected an invalid custom preset to be rejected');
