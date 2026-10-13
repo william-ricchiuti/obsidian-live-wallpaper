@@ -19,6 +19,19 @@ const { findChrome } = require('./find-chrome.js');
 const { startApp } = require('../parser.js');
 
 const PRESETS_TO_CHECK = ['Ambient', 'Mist', 'Confetti', 'Constellation']; // gradient, light/flat, curve/showcase, no-edges
+// Option combinations on the default theme that exercise the newer code paths.
+const OPTION_CASES = [
+  ['layout rings', { layout: 'rings' }],
+  ['layout timeline + framing fill', { layout: 'timeline', framing: 'fill' }],
+  ['layout galaxy + framing left', { layout: 'galaxy', framing: 'right', zoom: 1.3 }],
+  ['recency + tag shapes + palette', { nodeColorMode: 'recency', tagShapes: true, palette: 'neon' }],
+  ['labels recent + glow sprites', { hubLabels: true, labelSource: 'recent', labelStyle: { mode: 'glow' } }],
+  ['ambient + parallax + breathing', { ambientParticles: true, depthParallax: true, glowBreathing: true }],
+  ['focus note', { focusNote: 'Project MOC', focusHops: 2 }],
+  ['safe area + overlay + tint', { safeArea: { top: 30, right: 130, bottom: 90, left: 0 }, overlay: 'clock', timeOfDay: 'tint' }],
+  ['webgl renderer', { renderer: 'webgl' }],
+  ['framing none (legacy)', { framing: 'none' }]
+];
 const PORT = 3997;
 
 function log(msg) { process.stdout.write(msg + '\n'); }
@@ -59,14 +72,18 @@ function renderTitle(chrome, url, timeoutMs = 30000, extraArgs = []) {
   });
 }
 
+function cfgUrl(config, size = 1500) {
+  const qs = new URLSearchParams();
+  qs.set('synthetic', String(size));
+  qs.set('cfgjson', encodeURIComponent(JSON.stringify(config)));
+  qs.set('oneshot', '1');
+  return `http://127.0.0.1:${PORT}/?${qs.toString()}`;
+}
+
 function buildUrl(presets, name) {
   const p = presets.find(x => x.name === name);
   if (!p) throw new Error(`preset not found: ${name}`);
-  const qs = new URLSearchParams();
-  qs.set('synthetic', '1500');
-  qs.set('cfgjson', encodeURIComponent(JSON.stringify(p.config)));
-  qs.set('oneshot', '1');
-  return `http://127.0.0.1:${PORT}/?${qs.toString()}`;
+  return cfgUrl(p.config);
 }
 
 async function main() {
@@ -102,6 +119,22 @@ async function main() {
       if (drawn <= 0) { log(`  ✗ ${name}: no nodes drawn (title="${title}")`); failures++; continue; }
       log(`  ✓ ${name}: drew ${drawn} nodes`);
     }
+
+    const check = async (label, url) => {
+      const { title, stderr } = await renderTitle(chrome, url);
+      const m = title.match(/drawn=(\d+)\s+nodes=(\d+)/);
+      const drawn = m ? parseInt(m[1], 10) : -1;
+      const errLine = (stderr.split('\n').find(l => ERROR_RE.test(l)) || '').trim();
+      if (errLine) { log(`  ✗ ${label}: JS error → ${errLine.slice(0, 160)}`); failures++; return; }
+      if (drawn <= 0) { log(`  ✗ ${label}: nothing drawn (title="${title}")`); failures++; return; }
+      log(`  ✓ ${label}: drew ${drawn}`);
+    };
+    // Every theme the server knows about must load and draw.
+    const themes = require('../parser.js').THEME_LIST.map(t => t.id).filter(id => id !== 'default');
+    for (const id of themes) await check(`theme ${id}`, cfgUrl({ theme: id, hubLabels: true }, 600));
+    for (const [label, config] of OPTION_CASES) await check(label, cfgUrl(config, 800));
+    // A big synthetic graph takes the massive tier / spiral path.
+    await check('massive tier (6000 nodes)', cfgUrl({}, 6000));
 
     // prefers-reduced-motion must disable motion without blanking the graph.
     const { title: rmTitle, stderr: rmErr } = await renderTitle(

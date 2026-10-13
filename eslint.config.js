@@ -39,18 +39,38 @@ module.exports = [
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: 'script',
-      globals: { ...globals.worker, d3: 'readonly' }
+      globals: { ...globals.worker, d3: 'readonly', LayoutCore: 'readonly' }
     },
     rules: sharedRules
   },
   {
-    // Dual-environment UMD-style helper (loaded as a <script> in the browser,
-    // required as CommonJS in Node tests) — needs both global sets.
-    files: ['renderer-core.js'],
+    // Dual-environment UMD-style helpers (loaded as a <script> in the browser
+    // or importScripts in the worker, required as CommonJS in Node tests).
+    files: ['renderer-core.js', 'layout-core.js'],
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: 'script',
       globals: { ...globals.browser, ...globals.node }
+    },
+    rules: sharedRules
+  },
+  {
+    // Browser-only classic scripts loaded by index.html. Themes register on
+    // the shared THEMES object; the older hook-style themes (celestial, wash,
+    // sketch, stained-glass) read the renderer's top-level globals directly.
+    files: ['gl-renderer.js', 'themes/**/*.js'],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: 'script',
+      globals: {
+        ...globals.browser,
+        d3: 'readonly', THEMES: 'writable', SceneKit: 'writable',
+        cfg: 'readonly', nodes: 'readonly', links: 'readonly', ctx: 'readonly', canvas: 'readonly',
+        sceneTuning: 'readonly', tick: 'readonly', simAlpha: 'readonly', __cullFrame: 'readonly',
+        __drawnNodes: 'writable', labelCandidates: 'readonly', ambientPool: 'readonly',
+        nodeColor: 'readonly', edgeColor: 'readonly', hexToRGB: 'readonly', rgba: 'readonly',
+        finiteNumber: 'readonly', hashStr: 'readonly', motionTime: 'readonly'
+      }
     },
     rules: sharedRules
   }

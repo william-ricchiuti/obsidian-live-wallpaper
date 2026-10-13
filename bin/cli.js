@@ -10,7 +10,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { startApp } = require('../parser.js');
+const { startApp, sanitizePersistedConfig } = require('../parser.js');
 
 const args = process.argv.slice(2);
 
@@ -36,7 +36,8 @@ Usage:
 Options:
   -v, --vault <path>    Absolute path to your Obsidian vault (required first run)
   -p, --port <n>        HTTP port for the wallpaper server (default 3000)
-  -c, --config <file>   Config file to read/write (default ./obsidian-live-wallpaper.config.json)
+  -c, --config <file>   Config file to read/write (default ./obsidian-live-wallpaper.config.json;
+                        OLW_CONFIG works too). \`npm start -- --config <file>\` reads the same file.
   -h, --help            Show this help
 
 After it starts, point your wallpaper host (Plash / Lively / etc.) at the
@@ -48,7 +49,7 @@ printed http://127.0.0.1:<port> URL, and open /settings.html to customize.
 const vault = flag('-v', '--vault');
 const port = flag('-p', '--port');
 const configArg = flag('-c', '--config');
-const configPath = path.resolve(process.cwd(), configArg || 'obsidian-live-wallpaper.config.json');
+const configPath = path.resolve(process.cwd(), configArg || process.env.OLW_CONFIG || 'obsidian-live-wallpaper.config.json');
 
 let cfg = {};
 if (fs.existsSync(configPath)) {
@@ -68,6 +69,14 @@ if (!cfg.vaultPath) {
 }
 if (!fs.existsSync(cfg.vaultPath)) {
   console.error(`Vault path does not exist: ${cfg.vaultPath}`);
+  process.exit(1);
+}
+
+// Validate before writing, so a bad value never gets persisted to disk.
+try {
+  sanitizePersistedConfig(cfg);
+} catch (e) {
+  console.error(`${configPath}: ${e.message}`);
   process.exit(1);
 }
 

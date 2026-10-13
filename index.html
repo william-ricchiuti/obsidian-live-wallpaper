@@ -3,55 +3,82 @@
 <!-- Defense in depth: everything here is same-origin already (server binds
      127.0.0.1 only, D3 is vendored locally), so this mainly forecloses any
      future accidental third-party script/image/connect src. script-src and
-     style-src need 'unsafe-inline' because the renderer's whole logic and its
-     dynamic styling live in inline <script>/style="" rather than external
-     files — this CSP does not stop inline-script-based XSS, only cross-origin
-     resource loading. (frame-ancestors isn't honored via <meta>; would need
-     an HTTP header to add clickjacking protection.) -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'">
+     style-src need 'unsafe-inline' because the renderer's logic and dynamic
+     styling live inline. blob: is allowed for img so "Export PNG" can hand the
+     browser a download link. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src 'self'; object-src 'none'; base-uri 'self'">
 <style>
   html,body{margin:0;height:100%;overflow:hidden;}
-  canvas{display:block;}
+  body{--sa:#7c5cff;--sbg:rgba(14,14,20,0.92);--sfg:#e0e0e8;--ofg:#e8e8f0;}
+  /* Layer stack. Post effects (tint, grain, vignette) and the overlay widget
+     are separate compositor layers with CSS blend modes, so they cost nothing
+     per frame — the canvases never redraw for them. */
+  .layer{position:fixed;inset:0;pointer-events:none;display:block}
+  #bg{z-index:0} #gl{z-index:1;display:none} #c{z-index:2}
+  #tint{z-index:3;display:none}
+  #grain{z-index:4;mix-blend-mode:overlay;display:none}
+  #vignette{z-index:5;display:none}
+  #overlay{position:fixed;z-index:6;pointer-events:none;color:var(--ofg);font-family:-apple-system,BlinkMacSystemFont,'Inter','Segoe UI',sans-serif;display:none;max-width:min(440px,60vw)}
+  #overlay .clock{font-weight:200;font-size:clamp(40px,6.2vw,96px);line-height:1;letter-spacing:-0.02em;font-variant-numeric:tabular-nums}
+  #overlay .date{font-size:clamp(12px,1.1vw,17px);opacity:.72;margin-top:8px;font-weight:500}
+  #overlay .stats{display:flex;gap:clamp(18px,2.6vw,40px)}
+  #overlay .stat b{display:block;font-size:clamp(20px,2.4vw,34px);font-weight:500;font-variant-numeric:tabular-nums}
+  #overlay .stat span{font:clamp(9px,.8vw,12px)/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.08em;text-transform:uppercase;opacity:.65}
+  #overlay .note{border-radius:12px;padding:16px 20px;background:var(--ocard);border:1px solid var(--oline);backdrop-filter:blur(10px)}
+  #overlay .note small{display:block;font:clamp(9px,.75vw,11px)/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.06em;text-transform:uppercase;opacity:.6;margin-bottom:6px}
+  #overlay .note b{display:block;font-size:clamp(14px,1.2vw,18px);font-weight:600;margin-bottom:6px}
+  #overlay .note p{margin:0;font-size:clamp(12px,1vw,15px);line-height:1.5;opacity:.8}
   .search-wrap{position:fixed;top:18px;left:50%;transform:translateX(-50%);z-index:10;display:none;width:360px;max-width:90vw}
   .search-wrap.open{display:block}
-  .search-input{width:100%;padding:10px 14px;font-size:15px;background:rgba(14,14,20,0.92);border:1px solid rgba(124,92,255,0.5);border-radius:8px;color:#e0e0e8;outline:none;font-family:inherit;backdrop-filter:blur(12px)}
-  .search-input:focus{border-color:rgba(124,92,255,0.9)}
-  .search-results{max-height:320px;overflow-y:auto;margin-top:6px;background:rgba(14,14,20,0.9);border:1px solid rgba(124,92,255,0.3);border-radius:8px;color:#e0e0e8;backdrop-filter:blur(12px);display:none}
+  .search-input{box-sizing:border-box;width:100%;padding:10px 14px;font-size:15px;background:var(--sbg);border:1px solid color-mix(in srgb,var(--sa) 50%,transparent);border-radius:8px;color:var(--sfg);outline:none;font-family:inherit;backdrop-filter:blur(12px)}
+  .search-input:focus{border-color:var(--sa)}
+  .search-results{max-height:320px;overflow-y:auto;margin-top:6px;background:var(--sbg);border:1px solid color-mix(in srgb,var(--sa) 30%,transparent);border-radius:8px;color:var(--sfg);backdrop-filter:blur(12px);display:none}
   .search-results:not(:empty){display:block}
   .search-result{padding:8px 14px;font-size:13px;cursor:pointer;display:flex;align-items:center;gap:8px}
-  .search-result:hover,.search-result.focus{background:rgba(124,92,255,0.2)}
+  .search-result:hover,.search-result.focus{background:color-mix(in srgb,var(--sa) 20%,transparent)}
   .search-result .tag-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
   .search-result .label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .search-result .ghost-tag{font-size:10px;color:#888;margin-left:auto;flex-shrink:0}
+  .search-result .ghost-tag{font-size:10px;opacity:.6;margin-left:auto;flex-shrink:0}
+  .toast{position:fixed;bottom:18px;right:18px;z-index:11;font:13px -apple-system,BlinkMacSystemFont,sans-serif;background:rgba(10,10,14,.85);color:#eee;padding:10px 14px;border-radius:8px;display:none}
+  .toast a{color:#b9a8ff}
 </style></head><body>
-<canvas id="c"></canvas>
+<canvas id="bg" class="layer"></canvas>
+<canvas id="gl" class="layer"></canvas>
+<canvas id="c" class="layer"></canvas>
+<div id="tint" class="layer"></div>
+<canvas id="grain" class="layer"></canvas>
+<div id="vignette" class="layer"></div>
+<div id="overlay" aria-live="polite"></div>
 <div class="search-wrap" id="searchWrap">
-  <input type="text" class="search-input" id="searchInput" placeholder="Search nodes… (Ctrl+K)" autocomplete="off">
+  <input type="text" class="search-input" id="searchInput" placeholder="Search nodes… (Ctrl+K)" autocomplete="off" aria-label="Search notes">
   <div class="search-results" id="searchResults"></div>
 </div>
+<div class="toast" id="toast"></div>
 <script src="/vendor/d3.min.js"></script>
 <script src="/renderer-core.js"></script>
+<script src="/layout-core.js"></script>
+<script src="/gl-renderer.js"></script>
 <script src="/themes/registry.js"></script>
-<script src="/themes/celestial.js"></script>
-<script src="/themes/wash.js"></script>
-<script src="/themes/sketch.js"></script>
-<script src="/themes/stained-glass.js"></script>
+<script src="/themes/_scenekit.js"></script>
 <script>
 const canvas = document.getElementById('c');
-const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+// The main canvas is transparent: for the default theme the background and
+// cluster halos live on #bg underneath and only redraw when they change.
+const ctx = canvas.getContext('2d', { alpha: true });
+const bgCanvas = document.getElementById('bg');
+const bgCtx = bgCanvas.getContext('2d', { alpha: false });
+const glCanvas = document.getElementById('gl');
 const DEVICE_DPR = window.devicePixelRatio || 1;
 let renderScale = DEVICE_DPR;
 
-// DEFAULTS is fetched from /api/defaults; fallback for offline / synthetic mode.
-// Keep in sync with DEFAULTS in parser.js.
+// DEFAULTS is fetched from /api/defaults; this copy is the fallback for offline
+// and synthetic mode. scripts/smoke.js asserts it matches parser.js DEFAULTS.
 const DEFAULTS = {
   accent: '#7c5cff',
   background: '#0a0a0f',
   refreshMs: 5000,
-  tagColors: {},
   linkOpacity: 0.18,
   nodeGlow: true,
-  glowIntensity: 1,
   particles: true,
   particleSpeed: 1,
   particleDensity: 0.3,
@@ -68,13 +95,16 @@ const DEFAULTS = {
   autoScaleLargeVaults: true,
   showUnresolvedLinks: true,
   fastHash: true,
-  maxRenderedNodes: 5000,
+  glowIntensity: 1,
   edgeStyle: 'line',
   nodeColorMode: 'tag',
   labelFont: 'sans',
   autoTheme: false,
   lightAccent: '#39407a',
   lightBackground: '#ece6d6',
+  maxRenderedNodes: 5000,
+  ignorePaths: [],
+  tagColors: {},
   glowBreathing: true,
   glowBreathingSpeed: 1,
   glowBreathingDepth: 0.15,
@@ -87,22 +117,52 @@ const DEFAULTS = {
   depthParallax: true,
   depthParallaxStrength: 0.5,
   depthParallaxLayers: 3,
-  theme: 'default'
+  theme: 'default',
+  labelStyle: {},
+  layout: 'force',
+  framing: 'center',
+  zoom: 1,
+  offsetX: 0,
+  offsetY: 0,
+  safeArea: { top: 0, right: 0, bottom: 0, left: 0 },
+  palette: 'auto',
+  recencyDays: 7,
+  timeOfDay: 'off',
+  tagShapes: false,
+  grain: true,
+  vignette: false,
+  overlay: 'none',
+  labelSource: 'hubs',
+  focusNote: '',
+  focusHops: 2,
+  rotate: { themes: [], everyMinutes: 60 },
+  maxFps: 30,
+  idleFps: 10,
+  renderer: 'auto'
 };
 
-const EDGE_STYLES = new Set(['line', 'curve', 'none']);
-const NODE_COLOR_MODES = new Set(['tag', 'age', 'folder']);
-const LABEL_FONTS = new Set(['sans', 'mono', 'serif']);
+const ENUMS = {
+  motionMode: ['still', 'light', 'balanced', 'showcase'],
+  edgeStyle: ['line', 'curve', 'none'],
+  nodeColorMode: ['tag', 'age', 'folder', 'recency'],
+  labelFont: ['sans', 'mono', 'serif'],
+  layout: ['force', 'rings', 'timeline', 'galaxy'],
+  framing: ['center', 'fill', 'left', 'right', 'none'],
+  palette: ['auto', 'aurora', 'riso', 'metro', 'pastel', 'earth', 'neon', 'viridis', 'mono'],
+  timeOfDay: ['off', 'tint', 'palette'],
+  overlay: ['none', 'clock', 'stats', 'note'],
+  labelSource: ['hubs', 'recent'],
+  renderer: ['auto', 'canvas', 'webgl']
+};
 const FONT_STACKS = {
   sans: "-apple-system, BlinkMacSystemFont, 'Inter', sans-serif",
   mono: "ui-monospace, SFMono-Regular, Menlo, 'Cascadia Code', monospace",
   serif: "Georgia, 'Iowan Old Style', 'Times New Roman', serif"
 };
-function labelFontStack() {
-  const font = (cfg.labelStyle && cfg.labelStyle.fontStyle) || cfg.labelFont || 'sans';
-  return FONT_STACKS[font] || FONT_STACKS.sans;
-}
-// Deterministic per-folder color for nodeColorMode 'folder'.
+// labelFont is the font control. (labelStyle.fontStyle used to override it,
+// which made the settings dropdown do nothing after any preset was applied.)
+function labelFontStack() { return FONT_STACKS[cfg.labelFont] || FONT_STACKS.sans; }
+// Deterministic per-folder colour for nodeColorMode 'folder' without a palette.
 const FOLDER_COLOR_CACHE = new Map();
 function folderColor(folder) {
   if (!folder) return cfg.accent;
@@ -113,7 +173,7 @@ function folderColor(folder) {
   FOLDER_COLOR_CACHE.set(folder, c);
   return c;
 }
-// Age-palette: fresh (green) → mid (amber) → stale (red)
+// Age palette: fresh (green) → stale (red)
 const AGE_PALETTE = ['#78d97c', '#b8d960', '#e8c84a', '#e89a3c', '#d96b4a'];
 
 const MOTION_PROFILES = {
@@ -127,50 +187,12 @@ const MAX_PARTICLES = 600;
 const WIDTH_BUCKETS = [0.6, 0.95, 1.3];
 
 let cfg = { ...DEFAULTS };
-let sim;
+let __rawCfg = { ...DEFAULTS };
 let nodes = [];
 let links = [];
-let lastHash = '';
 let maxDeg = 1;
-let tick = 0;
-let prevNodeIds = new Set();
+let tick = 0; // frame counter (hook themes compare __vFrame against it)
 let particlePool = [];
-// Respect the OS "reduce motion" accessibility setting: no drift, particles, or
-// flares regardless of the active preset. Also a small battery win. Declared
-// before the first buildSceneTuning() call below, which reads it.
-let REDUCED_MOTION = false;
-try {
-  const __rmq = window.matchMedia('(prefers-reduced-motion: reduce)');
-  REDUCED_MOTION = __rmq.matches;
-  const __onRM = () => {
-    REDUCED_MOTION = __rmq.matches;
-    markConfigChanged();
-    if (typeof refreshSceneTuning === 'function') refreshSceneTuning();
-  };
-  if (__rmq.addEventListener) __rmq.addEventListener('change', __onRM);
-  else if (__rmq.addListener) __rmq.addListener(__onRM);
-} catch (e) {}
-
-// Auto light/dark: when a preset opts in (autoTheme) and the OS is in light mode,
-// swap to the preset's light accent/background and drop glow. __rawCfg holds the
-// un-themed config so we can re-derive cfg when the OS preference flips.
-let PREFERS_LIGHT = false;
-let __rawCfg = { ...DEFAULTS };
-try {
-  const __lq = window.matchMedia('(prefers-color-scheme: light)');
-  PREFERS_LIGHT = __lq.matches;
-  const __onL = () => {
-    PREFERS_LIGHT = __lq.matches;
-    cfg = applyAutoTheme(__rawCfg);
-    applyBackground();
-    markConfigChanged();
-    if (typeof refreshSceneTuning === 'function') refreshSceneTuning();
-    invalidateStaticLayer();
-  };
-  if (__lq.addEventListener) __lq.addEventListener('change', __onL);
-  else if (__lq.addListener) __lq.addListener(__onL);
-} catch (e) {}
-let sceneTuning = buildSceneTuning();
 let simRunning = false;
 let simAlpha = 0;
 let simWorker = null;
@@ -185,23 +207,33 @@ let lastSeenConfigVersion = 0;
 let labelCandidates = [];
 const RGB_CACHE = new Map();
 const edgeGroups = new Map();
-const nodeGroups = new Map();
 const particleDrawGroups = new Map();
 let activeParticleCount = 0;
-let __drawnNodes = 0; // count of nodes actually drawn last frame (used by renderer smoke probe)
-let __calmSince = 0;  // timestamp the scene last became "calm" (for deeper idle throttle)
-let __rankedIdx = null; // cached importance ranking for the renderable cap
+let __drawnNodes = 0; // nodes drawn last frame (read by the renderer smoke probe)
+let __cullFrame = -1;
+let __rankedIdx = null;
 let __rankValid = false;
-let __hasRendered = false; // gates the cross-fade so the very first paint doesn't fade
+let __hasRendered = false;
 let __fadeCanvas = null, __fadeStart = 0, __fadeActive = false;
 const FADE_MS = 240;
 let cachedHalos = null;
-let cachedHalosForAlpha = -1;
-let staticLayer = null;
-let staticLayerCtx = null;
 let staticLayerDirty = true;
 let staticLayerLastBuild = 0;
-function markConfigChanged() { lastConfigChangeAt = performance.now(); }
+let topologyHash = '';
+let graphEpoch = 0;
+let lastGraphEtag = '';
+let tagRank = new Map();
+let folderRank = new Map();
+let palette = null;
+let focusSet = null;
+let ambientPool = [];
+function markConfigChanged() { lastConfigChangeAt = performance.now(); wake(); }
+
+// Time used for motion phases, in "60fps ticks". Wall-clock based so drift,
+// pulses and particles move at the same speed whether the loop runs at 60,
+// 30 or 10 fps. Reduced motion freezes it.
+let REDUCED_MOTION = false;
+function motionTime() { return REDUCED_MOTION ? 0 : performance.now() / 16.6667; }
 
 const QUERY_PARAMS = (() => {
   try { return new URLSearchParams(location.search); }
@@ -209,6 +241,20 @@ const QUERY_PARAMS = (() => {
 })();
 const PERF_ENABLED = QUERY_PARAMS.get('perf') === '1';
 const ONESHOT = QUERY_PARAMS.get('oneshot') === '1';
+const EXPORT_MODE = QUERY_PARAMS.get('export') === '1';
+const PREVIEW_MODE = QUERY_PARAMS.get('preview') === '1';
+const HOUR_OVERRIDE = (() => {
+  const h = parseFloat(QUERY_PARAMS.get('hour') || '');
+  return Number.isFinite(h) && h >= 0 && h < 24 ? h : null;
+})();
+// Multi-monitor span: ?span=2of3 renders the 2nd of 3 side-by-side screens of
+// one shared layout. Each host page gets its own slice of the same graph.
+const SPAN = (() => {
+  const m = /^(\d+)of(\d+)$/.exec(QUERY_PARAMS.get('span') || '');
+  if (!m) return { index: 0, count: 1 };
+  const count = Math.max(1, Math.min(8, parseInt(m[2], 10)));
+  return { index: Math.max(0, Math.min(count - 1, parseInt(m[1], 10) - 1)), count };
+})();
 const SYNTHETIC_SIZE = (() => {
   const n = parseInt(QUERY_PARAMS.get('synthetic') || '', 10);
   return Number.isFinite(n) && n > 0 ? Math.min(200000, n) : 0;
@@ -219,98 +265,122 @@ const SYNTHETIC_CFG = (() => {
   try { return JSON.parse(decodeURIComponent(raw)); }
   catch (e) { console.warn('cfgjson parse failed', e.message); return null; }
 })();
+
+try {
+  const __rmq = window.matchMedia('(prefers-reduced-motion: reduce)');
+  REDUCED_MOTION = __rmq.matches;
+  const __onRM = () => {
+    REDUCED_MOTION = __rmq.matches;
+    refreshSceneTuning();
+    markConfigChanged();
+  };
+  if (__rmq.addEventListener) __rmq.addEventListener('change', __onRM);
+  else if (__rmq.addListener) __rmq.addListener(__onRM);
+} catch (e) {}
+
+let PREFERS_LIGHT = false;
+try {
+  const __lq = window.matchMedia('(prefers-color-scheme: light)');
+  PREFERS_LIGHT = __lq.matches;
+  const __onL = () => { PREFERS_LIGHT = __lq.matches; reapplyEffectiveConfig(true); };
+  if (__lq.addEventListener) __lq.addEventListener('change', __onL);
+  else if (__lq.addListener) __lq.addListener(__onL);
+} catch (e) {}
+
+let sceneTuning = buildSceneTuning();
+
+// ---------------------------------------------------------------------------
+// Synthetic graphs (screenshots and the renderer smoke test)
+// ---------------------------------------------------------------------------
+// A realistic vault: tags with hub notes, power-law links, journals, orphans,
+// unresolved links and edit times. Small enough graphs are settled with the
+// real layout code, so previews look like an actual vault, not a spiral.
 function buildSyntheticGraph(size) {
-  // Barabasi-like preferential-attachment graph with ~3 tags.
-  const nodes = new Array(size);
-  const tags = ['project', 'idea', 'reference', 'note', 'ref'];
+  let seed = 20261013;
+  const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
+  const TAGS = ['project', 'journal', 'research', 'idea', 'people', 'reading', 'meeting', 'reference'];
+  const WEIGHTS = [0.16, 0.24, 0.14, 0.1, 0.06, 0.08, 0.11, 0.08];
+  const FOLDERS = ['Projects', 'Daily', 'Research', 'Ideas', 'People', 'Library', 'Meetings', 'Reference'];
   const now = Date.now();
-  const spanMs = 1000 * 60 * 60 * 24 * 365 * 2;
-  // Pre-layout: golden-angle spiral with tag-based clustering offset, so
-  // synthetic previews don't need the worker sim to settle before capture.
-  const cx = innerWidth / 2;
-  const cy = innerHeight / 2;
-  const maxR = Math.min(innerWidth, innerHeight) * 0.42;
-  const PHI = Math.PI * (3 - Math.sqrt(5));
-  const tagCount = tags.length;
-  const clusterOffsets = new Array(tagCount);
-  for (let i = 0; i < tagCount; i++) {
-    const a = (i / tagCount) * Math.PI * 2;
-    clusterOffsets[i] = { x: Math.cos(a) * maxR * 0.28, y: Math.sin(a) * maxR * 0.28 };
-  }
-  for (let i = 0; i < size; i++) {
-    const r = Math.sin(i * 12.9898) * 43758.5453;
-    const frac = r - Math.floor(r);
-    const tagIdx = i % tagCount;
-    const radius = Math.sqrt(i / size) * maxR * 0.6;
-    const theta = i * PHI;
-    const offset = clusterOffsets[tagIdx];
-    nodes[i] = {
-      id: 'n' + i,
-      tag: tags[tagIdx],
-      mtime: now - frac * spanMs,
-      x: cx + offset.x + Math.cos(theta) * radius,
-      y: cy + offset.y + Math.sin(theta) * radius
-    };
-  }
-  const links = [];
-  const degree = new Int32Array(size);
-  const linkCap = Math.min(size * 4, 160000);
-  for (let i = 1; i < size && links.length < linkCap; i++) {
-    // Each new node attaches to k existing nodes biased by degree.
-    const k = 1 + (Math.random() < 0.35 ? 1 : 0) + (i > 20 && Math.random() < 0.15 ? 1 : 0);
+  const nodesOut = [];
+  const linksOut = [];
+  const seen = new Set();
+  const pools = TAGS.map(() => []);
+  const addLink = (a, b) => {
+    if (a === b) return;
+    const key = a < b ? a + '|' + b : b + '|' + a;
+    if (seen.has(key)) return;
+    seen.add(key);
+    linksOut.push({ source: a, target: b });
+  };
+  const ghosts = Math.max(1, Math.round(size * 0.07));
+  const real = size - ghosts;
+  TAGS.forEach((t, ti) => {
+    const id = t[0].toUpperCase() + t.slice(1) + ' MOC';
+    nodesOut.push({ id, tag: t, folder: FOLDERS[ti], mtime: now - rnd() * 20 * 86400000 });
+    pools[ti].push(id, id);
+  });
+  let journal = 0;
+  for (let i = nodesOut.length; i < real; i++) {
+    let r = rnd(), ti = 0;
+    for (; ti < WEIGHTS.length - 1 && r > WEIGHTS[ti]; ti++) r -= WEIGHTS[ti];
+    const tag = TAGS[ti];
+    const days = tag === 'journal' ? (journal++) * 1.1 : -Math.log(1 - rnd() * 0.995) * 70;
+    const id = tag === 'journal' ? new Date(now - days * 86400000).toISOString().slice(0, 10) + (journal > 300 ? '-' + i : '') : tag + '-' + i;
+    nodesOut.push({ id, tag, folder: rnd() < 0.1 ? 'Inbox' : FOLDERS[ti], mtime: now - days * 86400000 });
+    if (rnd() < 0.025) continue; // orphan
+    if (rnd() < (tag === 'journal' ? 0.18 : 0.55)) { addLink(id, pools[ti][0]); pools[ti].push(pools[ti][0]); }
+    const k = 1 + Math.floor(rnd() * 2.4);
     for (let j = 0; j < k; j++) {
-      let target;
-      if (Math.random() < 0.55 && i > 1) {
-        // preferential: pick a random existing edge endpoint
-        const pick = links[Math.floor(Math.random() * links.length)];
-        target = Math.random() < 0.5 ? pick.source : pick.target;
-        if (typeof target === 'string') target = parseInt(target.slice(1), 10);
-      } else {
-        target = Math.floor(Math.random() * i);
-      }
-      if (target === i) continue;
-      links.push({ source: 'n' + i, target: 'n' + target });
-      degree[i] += 1;
-      degree[target] += 1;
+      const target = pools[ti][Math.floor(rnd() * pools[ti].length)];
+      addLink(id, target);
+      pools[ti].push(target, id);
+    }
+    const cross = tag === 'journal' ? 2 : (rnd() < 0.45 ? 1 : 0);
+    for (let j = 0; j < cross; j++) {
+      const ct = Math.floor(rnd() * TAGS.length);
+      if (ct === ti) continue;
+      const target = pools[ct][Math.floor(rnd() * pools[ct].length)];
+      if (target) { addLink(id, target); pools[ct].push(target); }
     }
   }
-  return { nodes, links };
+  for (let j = 0; j < 6; j++) nodesOut[8 + Math.floor(rnd() * (real - 9))].mtime = now - rnd() * 1.5 * 86400000;
+  for (let g = 0; g < ghosts; g++) {
+    const id = 'Unresolved ' + g;
+    nodesOut.push({ id, ghost: true });
+    const c = 1 + Math.floor(rnd() * 2.5);
+    for (let j = 0; j < c; j++) addLink(nodesOut[Math.floor(rnd() * real)].id, id);
+  }
+  return { nodes: nodesOut, links: linksOut };
 }
+
+// ---------------------------------------------------------------------------
+// Perf HUD (?perf=1)
+// ---------------------------------------------------------------------------
 let __perfRecord = null;
 let __perfFrame = null;
 let __perfWrap = (name, fn) => fn;
-let __perfWrapTick = (fn) => fn;
 if (PERF_ENABLED) {
-  const SECTIONS = ['buildFramePoints', 'drawEdges', 'drawNodes', 'drawClusterHalos', 'tick'];
+  const SECTIONS = ['buildFramePoints', 'drawEdges', 'drawNodes', 'drawScene', 'frame'];
   const buckets = {};
-  SECTIONS.forEach(s => { buckets[s] = { sum: 0, count: 0, avgMs: 0, lastMs: 0 }; });
+  SECTIONS.forEach(s => { buckets[s] = { sum: 0, count: 0, avgMs: 0 }; });
   let frameCount = 0;
   let windowStart = performance.now();
-  const snapshot = { fps: 0, sections: buckets, nodes: 0, links: 0, particles: 0, alpha: 0 };
+  const snapshot = { fps: 0, sections: buckets, nodes: 0, links: 0, particles: 0, alpha: 0, calm: false };
   window.__perf = snapshot;
-  __perfRecord = (name, ms) => {
-    const b = buckets[name];
-    if (!b) return;
-    b.sum += ms;
-    b.count += 1;
-    b.lastMs = ms;
-  };
+  __perfRecord = (name, ms) => { const b = buckets[name]; if (b) { b.sum += ms; b.count += 1; } };
   __perfFrame = () => {
     frameCount += 1;
     const now = performance.now();
     const elapsed = now - windowStart;
     if (elapsed >= 1000) {
       snapshot.fps = Math.round((frameCount * 1000) / elapsed);
-      for (const s of SECTIONS) {
-        const b = buckets[s];
-        b.avgMs = b.count ? b.sum / b.count : 0;
-        b.sum = 0;
-        b.count = 0;
-      }
+      for (const s of SECTIONS) { const b = buckets[s]; b.avgMs = b.count ? b.sum / b.count : 0; b.sum = 0; b.count = 0; }
       snapshot.nodes = nodes.length;
       snapshot.links = links.length;
-      snapshot.particles = particlePool.length;
+      snapshot.particles = activeParticleCount;
       snapshot.alpha = simAlpha;
+      snapshot.calm = isSceneCalm();
       frameCount = 0;
       windowStart = now;
     }
@@ -321,30 +391,24 @@ if (PERF_ENABLED) {
     __perfRecord(name, performance.now() - t);
     return r;
   };
-  __perfWrapTick = (fn) => function () {
-    const t = performance.now();
-    const r = fn.apply(this, arguments);
-    __perfRecord('tick', performance.now() - t);
-    return r;
-  };
   const hud = document.createElement('div');
   hud.style.cssText = 'position:fixed;top:8px;left:8px;z-index:99999;font:11px/1.35 ui-monospace,Menlo,monospace;color:#b8f0ff;background:rgba(8,12,20,0.72);padding:8px 10px;border:1px solid rgba(120,180,220,0.25);border-radius:6px;pointer-events:none;white-space:pre;';
   hud.textContent = 'perf…';
-  const attach = () => document.body ? document.body.appendChild(hud) : addEventListener('DOMContentLoaded', () => document.body.appendChild(hud));
-  attach();
+  document.body.appendChild(hud);
   const fmt = (n) => n.toFixed(2).padStart(6);
   setInterval(() => {
     hud.textContent =
-      'FPS ' + String(snapshot.fps).padStart(3) + '\n' +
+      'FPS ' + String(snapshot.fps).padStart(3) + (snapshot.calm ? '  (idle)' : '') + '\n' +
+      'theme    ' + cfg.theme + (glActive ? ' [webgl]' : '') + '\n' +
       'nodes    ' + snapshot.nodes + '\n' +
       'links    ' + snapshot.links + '\n' +
       'particles ' + snapshot.particles + '\n' +
       'alpha    ' + snapshot.alpha.toFixed(4) + '\n' +
       'build    ' + fmt(buckets.buildFramePoints.avgMs) + ' ms\n' +
-      'halos    ' + fmt(buckets.drawClusterHalos.avgMs) + ' ms\n' +
       'edges    ' + fmt(buckets.drawEdges.avgMs) + ' ms\n' +
       'nodesDr  ' + fmt(buckets.drawNodes.avgMs) + ' ms\n' +
-      'tick     ' + fmt(buckets.tick.avgMs) + ' ms';
+      'scene    ' + fmt(buckets.drawScene.avgMs) + ' ms\n' +
+      'frame    ' + fmt(buckets.frame.avgMs) + ' ms';
   }, 500);
 }
 
@@ -360,37 +424,97 @@ function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
+// ---------------------------------------------------------------------------
+// Config
+// ---------------------------------------------------------------------------
 function normalizeConfig(data) {
   const next = { ...DEFAULTS, ...(isPlainObject(data) ? data : {}) };
-  next.motionMode = MOTION_PROFILES[next.motionMode] ? next.motionMode : DEFAULTS.motionMode;
+  for (const [key, allowed] of Object.entries(ENUMS)) {
+    if (!allowed.includes(next[key])) next[key] = DEFAULTS[key];
+  }
   next.tagColors = isPlainObject(next.tagColors) ? next.tagColors : {};
+  next.labelStyle = isPlainObject(next.labelStyle) ? next.labelStyle : {};
+  next.safeArea = isPlainObject(next.safeArea) ? { ...DEFAULTS.safeArea, ...next.safeArea } : { ...DEFAULTS.safeArea };
+  next.rotate = isPlainObject(next.rotate) && Array.isArray(next.rotate.themes) ? next.rotate : { ...DEFAULTS.rotate };
   next.glowIntensity = finiteNumber(next.glowIntensity) ? clamp(next.glowIntensity, 0, 1) : DEFAULTS.glowIntensity;
   next.maxRenderedNodes = finiteNumber(next.maxRenderedNodes)
     ? Math.max(100, Math.min(100000, Math.floor(next.maxRenderedNodes)))
     : DEFAULTS.maxRenderedNodes;
-  next.edgeStyle = EDGE_STYLES.has(next.edgeStyle) ? next.edgeStyle : DEFAULTS.edgeStyle;
-  next.nodeColorMode = NODE_COLOR_MODES.has(next.nodeColorMode) ? next.nodeColorMode : DEFAULTS.nodeColorMode;
-  next.labelFont = LABEL_FONTS.has(next.labelFont) ? next.labelFont : DEFAULTS.labelFont;
-  next.labelStyle = isPlainObject(next.labelStyle) ? next.labelStyle : {};
+  for (const key of ['zoom', 'offsetX', 'offsetY', 'recencyDays', 'focusHops', 'maxFps', 'idleFps']) {
+    if (!finiteNumber(next[key])) next[key] = DEFAULTS[key];
+  }
   next.autoTheme = next.autoTheme === true;
+  next.focusNote = typeof next.focusNote === 'string' ? next.focusNote : '';
+  if (typeof next.theme !== 'string' || !/^[a-z0-9-]+$/.test(next.theme)) next.theme = 'default';
   return next;
 }
 
-function applyAutoTheme(c) {
-  if (c.autoTheme && PREFERS_LIGHT) {
-    return { ...c, accent: c.lightAccent || c.accent, background: c.lightBackground || c.background, nodeGlow: false };
-  }
+function currentHour() {
+  if (HOUR_OVERRIDE !== null) return HOUR_OVERRIDE;
+  const d = new Date();
+  return d.getHours() + d.getMinutes() / 60;
+}
+
+// Rotation: cycle through rotate.themes every rotate.everyMinutes.
+function rotatedTheme(c) {
+  const list = c.rotate && Array.isArray(c.rotate.themes) ? c.rotate.themes : [];
+  if (!list.length) return c.theme;
+  const every = Math.max(1, c.rotate.everyMinutes || 60) * 60000;
+  return list[Math.floor(Date.now() / every) % list.length];
+}
+
+// Raw config → what the renderer actually uses: light colours (OS light mode or
+// daytime), the active rotated theme, and a contrast floor on the accent.
+function computeEffectiveConfig(raw) {
+  let c = { ...raw };
+  const useLight = (c.autoTheme && PREFERS_LIGHT) || (c.timeOfDay === 'palette' && isDaytime(currentHour()));
+  if (useLight) c = { ...c, accent: c.lightAccent || c.accent, background: c.lightBackground || c.background, nodeGlow: false };
+  c.theme = rotatedTheme(c);
+  c.accent = ensureContrast(c.accent, c.background, 1.8);
   return c;
 }
 
-// Config fields whose change warrants a cross-fade (preset-level shifts), as
-// opposed to a small slider tweak that should update instantly.
-const FADE_FIELDS = ['accent', 'background', 'nodeColorMode', 'edgeStyle', 'backgroundGradient', 'nodeGlow', 'motionMode', 'labelFont'];
+function reapplyEffectiveConfig(fade) {
+  const next = computeEffectiveConfig(__rawCfg);
+  const changed = next.theme !== cfg.theme || next.accent !== cfg.accent || next.background !== cfg.background;
+  if (!changed && !fade) { applyPostLayers(); return; }
+  if (changed && __hasRendered) snapshotForFade();
+  cfg = next;
+  ensureTheme(cfg.theme).then(() => { refreshSceneTuning(); applyBackground(); applyPostLayers(); markConfigChanged(); });
+}
+
+// Config fields whose change warrants a cross-fade (preset-level shifts).
+const FADE_FIELDS = ['accent', 'background', 'nodeColorMode', 'edgeStyle', 'backgroundGradient', 'nodeGlow', 'motionMode', 'labelFont', 'theme', 'palette', 'layout', 'framing'];
 function isBigVisualChange(prev, next) {
   for (const k of FADE_FIELDS) if (prev[k] !== next[k]) return true;
   return false;
 }
 
+// ---------------------------------------------------------------------------
+// Themes
+// ---------------------------------------------------------------------------
+const themeLoads = new Map();
+function ensureTheme(id) {
+  if (!id || id === 'default' || (window.THEMES && THEMES[id])) return Promise.resolve();
+  if (themeLoads.has(id)) return themeLoads.get(id);
+  const p = new Promise(resolve => {
+    const s = document.createElement('script');
+    s.src = '/themes/' + encodeURIComponent(id) + '.js';
+    s.onload = () => resolve();
+    s.onerror = () => { console.warn('theme failed to load:', id); resolve(); };
+    document.head.appendChild(s);
+  });
+  themeLoads.set(id, p);
+  return p;
+}
+function activeTheme() {
+  const t = window.THEMES && THEMES[cfg.theme];
+  return t && t.kind !== 'default' ? t : null;
+}
+
+// ---------------------------------------------------------------------------
+// Age / recency / colour
+// ---------------------------------------------------------------------------
 let __ageStats = null;
 function refreshAgeStats() {
   let min = Infinity, max = -Infinity;
@@ -402,11 +526,13 @@ function refreshAgeStats() {
   }
   __ageStats = Number.isFinite(min) && max > min ? { min, max } : null;
 }
-function ageColor(node) {
-  if (!__ageStats || !node.mtime) return AGE_PALETTE[0];
+function ageBucket(node) {
+  if (!__ageStats || !node.mtime) return AGE_PALETTE.length - 1;
   const t = (node.mtime - __ageStats.min) / (__ageStats.max - __ageStats.min);
-  const idx = Math.min(AGE_PALETTE.length - 1, Math.floor((1 - t) * AGE_PALETTE.length));
-  return AGE_PALETTE[idx];
+  return Math.min(AGE_PALETTE.length - 1, Math.floor((1 - t) * AGE_PALETTE.length));
+}
+function nodeDays(node) {
+  return node.mtime ? Math.max(0, (Date.now() - node.mtime) / 86400000) : 9999;
 }
 
 function currentMotionProfile() {
@@ -435,11 +561,7 @@ function buildSceneTuningRaw() {
 
   if (!cfg.autoScaleLargeVaults) {
     return {
-      motion: baseMotion,
-      dense,
-      huge,
-      massive,
-      ultra,
+      motion: baseMotion, dense, huge, massive, ultra,
       particlesEnabled: cfg.particles,
       particleDensity: cfg.particleDensity,
       particleCap: MAX_PARTICLES,
@@ -455,18 +577,14 @@ function buildSceneTuningRaw() {
       noteFlareEnabled: cfg.noteFlare,
       linkOpacityScale: 1,
       haloAlpha: cfg.clusterHalos ? 0.11 : 0,
-      haloRadiusBoost: 1,
-      skipSort: false
+      haloRadiusBoost: 1
     };
   }
 
   if (ultra) {
     return {
       motion: { ...MOTION_PROFILES.light, driftAmp: 0.18, phaseSpeed: 0.005, pulseSpeed: 0.007, particleSpawnEvery: 9999, particleBurst: 0, particleAlpha: 0.4 },
-      dense: true,
-      huge: true,
-      massive: true,
-      ultra: true,
+      dense: true, huge: true, massive: true, ultra: true,
       particlesEnabled: false,
       particleDensity: 0,
       particleCap: 0,
@@ -483,7 +601,6 @@ function buildSceneTuningRaw() {
       linkOpacityScale: 0.32,
       haloAlpha: 0,
       haloRadiusBoost: 0,
-      skipSort: true,
       maxRenderedNodes: 2800
     };
   }
@@ -491,10 +608,7 @@ function buildSceneTuningRaw() {
   if (massive) {
     return {
       motion: { ...MOTION_PROFILES.light, driftAmp: 0.24, phaseSpeed: 0.006, pulseSpeed: 0.009 },
-      dense: true,
-      huge: true,
-      massive: true,
-      ultra: false,
+      dense: true, huge: true, massive: true, ultra: false,
       particlesEnabled: cfg.particles && linkCount < 15000,
       particleDensity: cfg.particleDensity * 0.03,
       particleCap: 18,
@@ -511,17 +625,13 @@ function buildSceneTuningRaw() {
       linkOpacityScale: 0.42,
       haloAlpha: 0,
       haloRadiusBoost: 0,
-      skipSort: true,
       maxRenderedNodes: 3600
     };
   }
 
   return {
     motion: huge ? { ...baseMotion, driftAmp: baseMotion.driftAmp * 0.78, phaseSpeed: baseMotion.phaseSpeed * 0.82, pulseSpeed: baseMotion.pulseSpeed * 0.82 } : baseMotion,
-    dense,
-    huge,
-    massive: false,
-    ultra: false,
+    dense, huge, massive: false, ultra: false,
     particlesEnabled: cfg.particles && !(huge && linkCount > 5000),
     particleDensity: huge ? cfg.particleDensity * 0.18 : dense ? cfg.particleDensity * 0.55 : cfg.particleDensity,
     particleCap: huge ? 120 : dense ? 260 : MAX_PARTICLES,
@@ -537,8 +647,7 @@ function buildSceneTuningRaw() {
     noteFlareEnabled: cfg.noteFlare && !huge,
     linkOpacityScale: huge ? 0.78 : dense ? 0.9 : 1,
     haloAlpha: cfg.clusterHalos ? (huge ? 0.05 : dense ? 0.08 : 0.11) : 0,
-    haloRadiusBoost: huge ? 0.85 : dense ? 0.95 : 1,
-    skipSort: false
+    haloRadiusBoost: huge ? 0.85 : dense ? 0.95 : 1
   };
 }
 
@@ -559,75 +668,17 @@ function refreshSceneTuning() {
   sceneTuning = nextSceneTuning;
   ensureParticlePool(sceneTuning.particleCap);
   applyRenderableCap();
-  rebuildQuadtree();
   refreshDerivedVisuals();
+  initAmbientParticles();
+  updateGLState();
   cachedHalos = null;
+  framingDirty = true;
   if (scaleChanged) {
     renderScale = nextScale;
     resize();
   } else {
     invalidateStaticLayer();
   }
-}
-
-let lastQuadtreeBuild = 0;
-const VIEW_MARGIN = 100;
-let __cullFrame = -1;
-
-function rebuildQuadtree() {
-  if (typeof d3 === 'undefined' || typeof d3.quadtree !== 'function' || nodes.length === 0) {
-    sceneTuning.quadtree = null;
-    lastQuadtreeBuild = performance.now();
-    return;
-  }
-  const q = d3.quadtree().x(n => n.x).y(n => n.y);
-  for (let i = 0; i < nodes.length; i++) {
-    const n = nodes[i];
-    if (sceneTuning.maxRenderedNodes && n.__renderable === false) continue;
-    // Use the live position check, not the cached __hasPoint flag: the flag is
-    // only set once buildFramePoints has run, but the quadtree is first built
-    // during loadGraph (before any frame). Relying on __hasPoint here left the
-    // cull tree empty on first build, so every node got culled until the next
-    // rebuild — a blank flash on first paint, and a permanently blank frame in
-    // synthetic/oneshot mode where the sim never ticks a rebuild.
-    if (hasPoint(n)) q.add(n);
-  }
-  sceneTuning.quadtree = q;
-  lastQuadtreeBuild = performance.now();
-}
-
-function maybeRebuildQuadtree() {
-  if (!sceneTuning.quadtree) { rebuildQuadtree(); return; }
-  if (!simRunning) return;
-  const n = nodes ? nodes.length : 1;
-  const interval = simAlpha > 0.12
-    ? Math.max(400, Math.min(4000, n * 2))
-    : Math.max(1500, Math.min(12000, n * 6));
-  if (performance.now() - lastQuadtreeBuild >= interval) rebuildQuadtree();
-}
-
-function markVisibleNodes() {
-  const quad = sceneTuning.quadtree;
-  if (!quad) return false;
-  const minX = -VIEW_MARGIN;
-  const minY = -VIEW_MARGIN;
-  const maxX = innerWidth + VIEW_MARGIN;
-  const maxY = innerHeight + VIEW_MARGIN;
-  quad.visit((qnode, x1, y1, x2, y2) => {
-    if (!qnode.length) {
-      let leaf = qnode;
-      do {
-        const d = leaf.data;
-        if (d && d.x >= minX && d.x <= maxX && d.y >= minY && d.y <= maxY) {
-          d.__vFrame = tick;
-        }
-      } while ((leaf = leaf.next));
-      return;
-    }
-    return x1 >= maxX || y1 >= maxY || x2 < minX || y2 < minY;
-  });
-  __cullFrame = tick;
-  return true;
 }
 
 function ensureParticlePool(cap) {
@@ -642,59 +693,269 @@ function ensureParticlePool(cap) {
   }
 }
 
+// Focus note: show only the neighbourhood (focusHops) of one note. 'today'
+// resolves to today's daily note (YYYY-MM-DD).
+function computeFocusSet() {
+  const q = (cfg.focusNote || '').trim();
+  if (!q || !nodes.length) return null;
+  const want = (q.toLowerCase() === 'today' ? dayKey() : q).toLowerCase();
+  let root = -1;
+  for (let i = 0; i < nodes.length; i++) {
+    const n = nodes[i];
+    const label = (n.label || n.id).toLowerCase();
+    if (n.id.toLowerCase() === want || label === want) { root = i; break; }
+  }
+  if (root < 0) return null;
+  const adj = nodes.map(() => []);
+  for (const l of links) {
+    const a = l.source.__index, b = l.target.__index;
+    if (a === undefined || b === undefined) continue;
+    adj[a].push(b); adj[b].push(a);
+  }
+  const dist = new Int16Array(nodes.length).fill(-1);
+  dist[root] = 0;
+  const queue = [root];
+  for (let h = 0; h < queue.length; h++) {
+    const u = queue[h];
+    if (dist[u] >= cfg.focusHops) continue;
+    for (const v of adj[u]) if (dist[v] < 0) { dist[v] = dist[u] + 1; queue.push(v); }
+  }
+  const set = new Set();
+  for (let i = 0; i < nodes.length; i++) if (dist[i] >= 0) set.add(i);
+  return set;
+}
+
 function applyRenderableCap() {
+  focusSet = computeFocusSet();
   const cfgCap = finiteNumber(cfg.maxRenderedNodes) ? Math.floor(cfg.maxRenderedNodes) : 0;
   const tierCap = sceneTuning.maxRenderedNodes || 0;
   let cap = 0;
   if (cfgCap > 0 && tierCap > 0) cap = Math.min(cfgCap, tierCap);
   else cap = cfgCap || tierCap;
-  sceneTuning.maxRenderedNodes = cap;
   if (!cap || cap >= nodes.length) {
     for (let i = 0; i < nodes.length; i++) nodes[i].__renderable = true;
-    return;
+    sceneTuning.maxRenderedNodes = focusSet ? nodes.length : 0;
+  } else {
+    sceneTuning.maxRenderedNodes = cap;
+    // The importance ranking only changes when the graph reloads; sort once.
+    if (!__rankValid || !__rankedIdx || __rankedIdx.length !== nodes.length) {
+      const idx = new Array(nodes.length);
+      for (let i = 0; i < nodes.length; i++) idx[i] = i;
+      idx.sort((a, b) => (nodes[b].importance || 0) - (nodes[a].importance || 0));
+      __rankedIdx = idx;
+      __rankValid = true;
+    }
+    for (let i = 0; i < nodes.length; i++) nodes[i].__renderable = false;
+    for (let i = 0; i < cap && i < __rankedIdx.length; i++) nodes[__rankedIdx[i]].__renderable = true;
   }
-  // The importance ranking only changes when the graph reloads, but this runs on
-  // every refreshSceneTuning (including window resize). Sort once, then reuse the
-  // cached order — only the cap (how many of the ranked nodes are kept) varies.
-  if (!__rankValid || !__rankedIdx || __rankedIdx.length !== nodes.length) {
-    const idx = new Array(nodes.length);
-    for (let i = 0; i < nodes.length; i++) idx[i] = i;
-    idx.sort((a, b) => (nodes[b].importance || 0) - (nodes[a].importance || 0));
-    __rankedIdx = idx;
-    __rankValid = true;
+  if (focusSet) {
+    for (let i = 0; i < nodes.length; i++) if (!focusSet.has(i)) nodes[i].__renderable = false;
   }
-  const idx = __rankedIdx;
-  for (let i = 0; i < nodes.length; i++) nodes[i].__renderable = false;
-  for (let i = 0; i < cap && i < idx.length; i++) nodes[idx[i]].__renderable = true;
+  sceneDirty = true;
 }
 
 function applyBackground() {
   document.body.style.background = cfg.background;
+  // #bg is opaque; paint it right away so there is never a black flash before
+  // the first frame (or while the page starts hidden).
+  bgCtx.fillStyle = cfg.background;
+  bgCtx.fillRect(0, 0, innerWidth, innerHeight);
+  staticLayerDirty = true;
+  // Theme the search overlay from the wallpaper's own colours.
+  const dark = luminance(cfg.background) < 0.4;
+  document.body.style.setProperty('--sa', cfg.accent);
+  document.body.style.setProperty('--sbg', dark ? 'rgba(14,14,20,0.92)' : 'rgba(250,250,247,0.94)');
+  document.body.style.setProperty('--sfg', dark ? '#e0e0e8' : '#1d1d22');
 }
 
+// ---------------------------------------------------------------------------
+// Post layers (CSS compositor, zero per-frame cost)
+// ---------------------------------------------------------------------------
+const tintEl = document.getElementById('tint');
+const grainEl = document.getElementById('grain');
+const vignetteEl = document.getElementById('vignette');
+const overlayEl = document.getElementById('overlay');
+function themeIsDark() {
+  const t = activeTheme();
+  if (t && typeof t.dark === 'boolean') return t.dark;
+  return luminance(cfg.background) < 0.4;
+}
+function themeForeground() {
+  const t = activeTheme();
+  if (t && t.kind === 'scene' && t.fg) return t.dark ? '#f0eee8' : t.fg;
+  return themeIsDark() ? '#eceaf2' : '#23222a';
+}
+let grainBuiltFor = '';
+function buildGrain() {
+  const w = Math.max(1, Math.round(innerWidth * Math.min(DEVICE_DPR, 2)));
+  const h = Math.max(1, Math.round(innerHeight * Math.min(DEVICE_DPR, 2)));
+  const key = w + 'x' + h;
+  if (grainBuiltFor === key) return;
+  grainBuiltFor = key;
+  grainEl.width = w; grainEl.height = h;
+  grainEl.style.width = innerWidth + 'px'; grainEl.style.height = innerHeight + 'px';
+  const g = grainEl.getContext('2d');
+  const tile = document.createElement('canvas');
+  tile.width = tile.height = 256;
+  const tg = tile.getContext('2d');
+  const img = tg.createImageData(256, 256);
+  let s = 7;
+  for (let i = 0; i < img.data.length; i += 4) {
+    s = (s * 16807) % 2147483647;
+    const v = (s / 2147483647) * 255 | 0;
+    img.data[i] = img.data[i + 1] = img.data[i + 2] = v;
+    img.data[i + 3] = 255;
+  }
+  tg.putImageData(img, 0, 0);
+  g.fillStyle = g.createPattern(tile, 'repeat');
+  g.fillRect(0, 0, w, h);
+}
+function applyPostLayers() {
+  const dark = themeIsDark();
+  // Grain (also dithers away gradient banding on large displays).
+  if (cfg.grain) {
+    buildGrain();
+    grainEl.style.display = 'block';
+    grainEl.style.opacity = dark ? '0.07' : '0.1';
+  } else {
+    grainEl.style.display = 'none';
+  }
+  if (cfg.vignette) {
+    vignetteEl.style.display = 'block';
+    vignetteEl.style.background = dark
+      ? 'radial-gradient(ellipse at center, rgba(0,0,0,0) 45%, rgba(0,0,0,0.55) 100%)'
+      : 'radial-gradient(ellipse at center, rgba(60,48,36,0) 50%, rgba(60,48,36,0.22) 100%)';
+  } else {
+    vignetteEl.style.display = 'none';
+  }
+  const tint = cfg.timeOfDay === 'tint' ? timeOfDayTint(currentHour()) : null;
+  if (tint) {
+    tintEl.style.display = 'block';
+    tintEl.style.background = tint.color;
+    tintEl.style.mixBlendMode = tint.op;
+    tintEl.style.opacity = String(tint.alpha);
+  } else {
+    tintEl.style.display = 'none';
+  }
+  renderOverlay();
+}
+
+// ---------------------------------------------------------------------------
+// Overlay widget (DOM, updated on its own timers)
+// ---------------------------------------------------------------------------
+let overlayTimer = null;
+let noteOfHour = null;
+let noteOfHourKey = '';
+function esc(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+function vaultStats() {
+  let notes = 0, ghosts = 0, today = 0;
+  const now = Date.now();
+  for (const n of nodes) {
+    if (n.ghost) { ghosts++; continue; }
+    notes++;
+    if (n.mtime && now - n.mtime < 86400000) today++;
+  }
+  return { notes, links: links.length, recent: today, unresolved: ghosts };
+}
+function renderOverlay() {
+  if (overlayTimer) { clearTimeout(overlayTimer); overlayTimer = null; }
+  const mode = cfg.overlay;
+  if (!mode || mode === 'none') { overlayEl.style.display = 'none'; return; }
+  const sa = cfg.safeArea || {};
+  const k = Math.max(0.6, innerWidth / 1280);
+  overlayEl.style.display = 'block';
+  overlayEl.style.left = ((sa.left || 0) + 44 * k) + 'px';
+  overlayEl.style.bottom = ((sa.bottom || 0) + 40 * k) + 'px';
+  const dark = themeIsDark();
+  overlayEl.style.setProperty('--ofg', themeForeground());
+  overlayEl.style.setProperty('--ocard', dark ? 'rgba(8,8,12,0.55)' : 'rgba(255,255,255,0.7)');
+  overlayEl.style.setProperty('--oline', dark ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.1)');
+  if (mode === 'clock') {
+    const d = new Date();
+    overlayEl.innerHTML = '<div class="clock">' + esc(d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })) +
+      '</div><div class="date">' + esc(d.toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'long' })) + '</div>';
+    overlayTimer = setTimeout(renderOverlay, 60000 - (d.getSeconds() * 1000 + d.getMilliseconds()) + 50);
+  } else if (mode === 'stats') {
+    const s = vaultStats();
+    overlayEl.innerHTML = '<div class="stats">' + [[s.notes, 'notes'], [s.links.toLocaleString(), 'links'], [s.recent, 'edited today'], [s.unresolved, 'unresolved']]
+      .map(([v, l]) => '<div class="stat"><b>' + esc(v) + '</b><span>' + esc(l) + '</span></div>').join('') + '</div>';
+  } else if (mode === 'note') {
+    const hourKey = String(Math.floor(Date.now() / 3600000));
+    if (noteOfHourKey !== hourKey && SYNTHETIC_SIZE === 0) {
+      noteOfHourKey = hourKey;
+      loadJson('/api/note-of-hour?hour=' + hourKey).then(n => { noteOfHour = n; renderOverlay(); });
+    }
+    const n = noteOfHour;
+    if (n && n.title) {
+      const when = n.mtime ? SceneKit.ago(Math.max(0, (Date.now() - n.mtime) / 86400000)) : '';
+      overlayEl.innerHTML = '<div class="note"><small>Note of the hour' + (n.folder ? ' · ' + esc(n.folder) + '/' : '') + (when ? ' · edited ' + esc(when) : '') +
+        '</small><b>' + esc(n.title) + '</b>' + (n.excerpt ? '<p>' + esc(n.excerpt) + '</p>' : '') + '</div>';
+    } else {
+      overlayEl.innerHTML = '';
+    }
+    const now = Date.now();
+    overlayTimer = setTimeout(renderOverlay, 3600000 - (now % 3600000) + 100);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Canvas sizing and layers
+// ---------------------------------------------------------------------------
 function resize() {
-  canvas.width = innerWidth * renderScale;
-  canvas.height = innerHeight * renderScale;
-  canvas.style.width = innerWidth + 'px';
-  canvas.style.height = innerHeight + 'px';
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.scale(renderScale, renderScale);
+  for (const c of [canvas, bgCanvas]) {
+    c.width = Math.max(1, Math.round(innerWidth * renderScale));
+    c.height = Math.max(1, Math.round(innerHeight * renderScale));
+    c.style.width = innerWidth + 'px';
+    c.style.height = innerHeight + 'px';
+  }
+  ctx.setTransform(renderScale, 0, 0, renderScale, 0, 0);
+  bgCtx.setTransform(renderScale, 0, 0, renderScale, 0, 0);
+  bgCtx.fillStyle = cfg.background;
+  bgCtx.fillRect(0, 0, innerWidth, innerHeight);
+  if (glRenderer) glRenderer.resize(innerWidth, innerHeight, renderScale);
   invalidateStaticLayer();
+  framingDirty = true;
+  sceneDirty = true;
 }
 
-resize();
-addEventListener('resize', () => { resize(); invalidateStaticLayer(); markConfigChanged(); });
+let glRenderer = null;
+let glActive = false;
+let glTried = false;
+function updateGLState() {
+  const theme = activeTheme();
+  const want = !theme && (cfg.renderer === 'webgl' || (cfg.renderer === 'auto' && (sceneTuning.massive || sceneTuning.ultra)));
+  if (want && !glRenderer && !glTried) {
+    glTried = true;
+    try { glRenderer = window.GLRenderer ? GLRenderer.create(glCanvas) : null; } catch (e) { glRenderer = null; }
+    if (glRenderer) glRenderer.resize(innerWidth, innerHeight, renderScale);
+  }
+  glActive = !!(want && glRenderer);
+  glCanvas.style.display = glActive ? 'block' : 'none';
+  if (!glActive && glRenderer) glRenderer.clear();
+}
+
+addEventListener('resize', () => {
+  resize();
+  grainBuiltFor = '';
+  applyPostLayers();
+  initAmbientParticles();
+  markConfigChanged();
+  // Resizing clears the canvases; oneshot captures have no frame loop, so
+  // repaint directly (headless screenshots resize the window before capture).
+  if (ONESHOT && __bootDone) { for (let i = 0; i < 2; i++) draw(); }
+});
 
 let GLOW_SPRITE_CACHE = new Map();
 const GLOW_SPRITE_CACHE_MAX = 60;
-let GLOW_SPRITE_CACHE_ORDER = [];
 const GLOW_SPRITE_SIZE = 128;
 
-// Helper to shift hue for chromatic bloom
 function rgbToHsl(r, g, b) {
   r /= 255; g /= 255; b /= 255;
   const max = Math.max(r, g, b), min = Math.min(r, g, b);
-  let h = 0, s, l = (max + min) / 2;
+  let h = 0, s;
+  const l = (max + min) / 2;
   if (max !== min) {
     const d = max - min;
     s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
@@ -710,64 +971,44 @@ function rgbToHsl(r, g, b) {
 function hueShift(hex, shift) {
   const [r, g, b] = hexToRGB(hex);
   const hsl = rgbToHsl(r, g, b);
-  hsl[0] = (hsl[0] + shift) % 360;
+  hsl[0] = (hsl[0] + shift + 360) % 360;
   return hslToHex(hsl[0], hsl[1], hsl[2]);
 }
 
-// Sprites are always rasterised at GLOW_SPRITE_SIZE and scaled by drawImage at
-// draw time. Keying the cache on the per-node draw size (which changes every
-// frame while breathing) would allocate a fresh canvas per node per frame.
+// Sprites are rasterised once per colour at GLOW_SPRITE_SIZE and scaled by
+// drawImage at draw time. Map insertion order gives a cheap LRU.
 function getGlowSprite(hex, chromatic, chromaticIntensity) {
-  const size = GLOW_SPRITE_SIZE;
-  if (chromatic === undefined) chromatic = false;
-  if (chromaticIntensity === undefined) chromaticIntensity = 0;
-  const key = chromatic ? `${hex}-c${chromaticIntensity.toFixed(1)}` : hex;
+  const key = chromatic ? `${hex}-c${(chromaticIntensity || 0).toFixed(1)}` : hex;
   let sprite = GLOW_SPRITE_CACHE.get(key);
-  if (sprite) return sprite;
-
+  if (sprite) { GLOW_SPRITE_CACHE.delete(key); GLOW_SPRITE_CACHE.set(key, sprite); return sprite; }
+  const size = GLOW_SPRITE_SIZE;
   sprite = document.createElement('canvas');
   sprite.width = sprite.height = size;
   const g = sprite.getContext('2d');
-
   const half = size / 2;
-  const baseRadius = half * 0.9;
-
-  // Base glow (always present)
-  let grad = g.createRadialGradient(half, half, 0, half, half, baseRadius);
+  let grad = g.createRadialGradient(half, half, 0, half, half, half * 0.9);
   grad.addColorStop(0, rgba(...hexToRGB(hex), 1));
   grad.addColorStop(0.6, rgba(...hexToRGB(hex), 0.5));
   grad.addColorStop(1, rgba(...hexToRGB(hex), 0));
   g.fillStyle = grad;
   g.fillRect(0, 0, size, size);
-
-  // Chromatic bloom layer
   if (chromatic && chromaticIntensity > 0) {
     g.globalCompositeOperation = 'lighter';
     const bloomRadius = half * (1 + chromaticIntensity * 0.5);
-    const bloomShift1 = hueShift(hex, 30);
-    const bloomShift2 = hueShift(hex, -30);
-
-    grad = g.createRadialGradient(half, half, 0, half, half, bloomRadius);
-    grad.addColorStop(0, rgba(...hexToRGB(bloomShift1), 0.05 * chromaticIntensity));
-    grad.addColorStop(0.7, rgba(...hexToRGB(bloomShift1), 0.15 * chromaticIntensity));
-    grad.addColorStop(1, rgba(...hexToRGB(bloomShift1), 0));
-    g.fillStyle = grad;
-    g.fillRect(0, 0, size, size);
-
-    grad = g.createRadialGradient(half, half, 0, half, half, bloomRadius);
-    grad.addColorStop(0, rgba(...hexToRGB(bloomShift2), 0.05 * chromaticIntensity));
-    grad.addColorStop(0.7, rgba(...hexToRGB(bloomShift2), 0.15 * chromaticIntensity));
-    grad.addColorStop(1, rgba(...hexToRGB(bloomShift2), 0));
-    g.fillStyle = grad;
-    g.fillRect(0, 0, size, size);
+    for (const shift of [30, -30]) {
+      const c = hueShift(hex, shift);
+      grad = g.createRadialGradient(half, half, 0, half, half, bloomRadius);
+      grad.addColorStop(0, rgba(...hexToRGB(c), 0.05 * chromaticIntensity));
+      grad.addColorStop(0.7, rgba(...hexToRGB(c), 0.15 * chromaticIntensity));
+      grad.addColorStop(1, rgba(...hexToRGB(c), 0));
+      g.fillStyle = grad;
+      g.fillRect(0, 0, size, size);
+    }
   }
-
   while (GLOW_SPRITE_CACHE.size >= GLOW_SPRITE_CACHE_MAX) {
-    const evict = GLOW_SPRITE_CACHE_ORDER.shift();
-    if (evict) GLOW_SPRITE_CACHE.delete(evict);
+    GLOW_SPRITE_CACHE.delete(GLOW_SPRITE_CACHE.keys().next().value);
   }
   GLOW_SPRITE_CACHE.set(key, sprite);
-  GLOW_SPRITE_CACHE_ORDER.push(key);
   return sprite;
 }
 
@@ -782,9 +1023,13 @@ function snapshotForFade() {
     }
     const g = __fadeCanvas.getContext('2d');
     g.clearRect(0, 0, w, h);
+    // Composite every visible layer so the fade covers background changes too.
+    if (bgCanvas.style.display !== 'none') g.drawImage(bgCanvas, 0, 0, w, h);
+    if (glActive) g.drawImage(glCanvas, 0, 0, w, h);
     g.drawImage(canvas, 0, 0);
     __fadeStart = performance.now();
     __fadeActive = true;
+    wake();
   } catch (e) { __fadeActive = false; }
 }
 
@@ -802,47 +1047,21 @@ function drawFadeOverlay() {
 
 function invalidateStaticLayer() { staticLayerDirty = true; cachedHalos = null; }
 
-function ensureStaticLayer() {
-  const w = Math.max(1, Math.floor(innerWidth * renderScale));
-  const h = Math.max(1, Math.floor(innerHeight * renderScale));
-  if (!staticLayer || staticLayer.width !== w || staticLayer.height !== h) {
-    if (typeof OffscreenCanvas !== 'undefined') {
-      staticLayer = new OffscreenCanvas(w, h);
-    } else {
-      staticLayer = document.createElement('canvas');
-      staticLayer.width = w;
-      staticLayer.height = h;
-    }
-    staticLayerCtx = staticLayer.getContext('2d');
-    staticLayerDirty = true;
-  }
-}
-
+// Background + cluster halos, painted onto #bg only when something changes.
 function renderStaticLayer() {
-  ensureStaticLayer();
-  const g = staticLayerCtx;
+  const g = bgCtx;
   g.setTransform(renderScale, 0, 0, renderScale, 0, 0);
-  g.clearRect(0, 0, innerWidth, innerHeight);
+  g.fillStyle = cfg.background;
+  g.fillRect(0, 0, innerWidth, innerHeight);
   drawBackgroundGradient(g);
   drawClusterHalos(g);
   staticLayerDirty = false;
   staticLayerLastBuild = performance.now();
 }
 
-function drawStaticLayer() {
-  if (!staticLayer) {
-    renderStaticLayer();
-  } else if (staticLayerDirty) {
-    if (!simRunning || performance.now() - staticLayerLastBuild >= 500) {
-      renderStaticLayer();
-    }
-  }
-  if (staticLayer) {
-    ctx.save();
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.drawImage(staticLayer, 0, 0);
-    ctx.restore();
-  }
+function maybeRenderStaticLayer() {
+  if (!staticLayerDirty) return;
+  if (!simRunning || performance.now() - staticLayerLastBuild >= 500) renderStaticLayer();
 }
 
 function hexToRGB(h) {
@@ -858,11 +1077,6 @@ function rgba(r, g, b, a) {
   return `rgba(${r},${g},${b},${a})`;
 }
 
-function hex2rgba(h, a) {
-  const [r, g, b] = hexToRGB(h);
-  return rgba(r, g, b, a);
-}
-
 function nodeColor(node) {
   return node.__color || cfg.accent;
 }
@@ -871,21 +1085,45 @@ function edgeColor(link) {
   return link.__color || cfg.accent;
 }
 
+function rankMap(values) {
+  const counts = new Map();
+  for (const v of values) if (v) counts.set(v, (counts.get(v) || 0) + 1);
+  const m = new Map();
+  Array.from(counts.entries()).sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).forEach(([v], i) => m.set(v, i));
+  return m;
+}
+
 function refreshDerivedVisuals() {
+  palette = cfg.palette && cfg.palette !== 'auto' ? PALETTES[cfg.palette] || null : null;
   if (nodes.length === 0) {
     labelCandidates = [];
     return;
   }
-
   refreshAgeStats();
+  tagRank = rankMap(nodes.filter(n => !n.ghost).map(n => n.tag));
+  folderRank = rankMap(nodes.filter(n => !n.ghost).map(n => n.folder));
+  const mode = cfg.nodeColorMode;
+  const recencyDays = cfg.recencyDays || 7;
 
   for (let i = 0; i < nodes.length; i++) {
     const node = nodes[i];
-    node.__color = cfg.nodeColorMode === 'age'
-      ? ageColor(node)
-      : cfg.nodeColorMode === 'folder'
-        ? folderColor(node.folder)
-        : ((node.tag && cfg.tagColors[node.tag]) || cfg.accent);
+    let color;
+    if (mode === 'age') {
+      const b = ageBucket(node);
+      color = palette ? palette[b % palette.length] : AGE_PALETTE[b];
+    } else if (mode === 'folder') {
+      color = palette && node.folder ? palette[(folderRank.get(node.folder) || 0) % palette.length] : folderColor(node.folder);
+    } else {
+      color = (node.tag && cfg.tagColors[node.tag])
+        || (palette && node.tag ? palette[(tagRank.get(node.tag) || 0) % palette.length] : null)
+        || cfg.accent;
+    }
+    node.__color = color;
+    node.__dim = mode === 'recency' && (node.ghost || nodeDays(node) >= recencyDays) ? 1 : 0;
+    node.__shape = node.tag ? (tagRank.get(node.tag) || 0) % 4 : 0;
+    // Breathing offset is always assigned (it used to be set only if breathing
+    // was on at load, so enabling it later gave NaN and erased every glow).
+    node.__breathOffset = (Math.abs(hashStr(node.id)) % 6283) / 1000;
     node.__labelText = truncateLabel(node.label || node.id, 28);
     node.__labelFontSize = Math.max(10, 11 + (node.importance || 0) * 5);
     if (!node.ghost && (node.importance || 0) >= sceneTuning.labelMinImportance) {
@@ -898,16 +1136,20 @@ function refreshDerivedVisuals() {
 
   for (let i = 0; i < links.length; i++) {
     const link = links[i];
-    // Edges inherit the source node's resolved color so coloring works for tag,
-    // age, and folder modes alike.
+    // Edges inherit the source node's resolved colour so colouring works for
+    // tag, age, and folder modes alike.
     link.__color = sceneTuning.edgeColoringEnabled
       ? (link.source.__color || link.target.__color || cfg.accent)
       : cfg.accent;
   }
 
-  labelCandidates = [...nodes]
-    .filter(node => !node.ghost && hasPoint(node))
-    .sort((a, b) => (b.importance || 0) - (a.importance || 0));
+  if (cfg.labelSource === 'recent') {
+    labelCandidates = nodes.filter(n => !n.ghost && n.mtime).sort((a, b) => b.mtime - a.mtime).slice(0, 60);
+  } else {
+    labelCandidates = nodes.filter(node => !node.ghost).sort((a, b) => (b.importance || 0) - (a.importance || 0));
+  }
+  sceneDirty = true;
+  labelSpriteCache.clear();
 }
 
 function syncSharedPositions() {
@@ -921,36 +1163,171 @@ function syncSharedPositions() {
   }
 }
 
-function buildFramePoints() {
-  if (simSharedEnabled && simRunning) syncSharedPositions();
-  const cap = sceneTuning.maxRenderedNodes || 0;
-  const motion = sceneTuning.motion;
-  for (let i = 0; i < nodes.length; i++) {
-    const node = nodes[i];
-    node.__vFrame = -1;
-    if (cap && node.__renderable === false) {
-      node.__fx = NaN;
-      node.__fy = NaN;
-      continue;
-    }
-    const ok = hasPoint(node);
-    node.__hasPoint = ok;
-    if (!ok) {
-      node.__fx = NaN;
-      node.__fy = NaN;
-      continue;
-    }
-    const importance = 0.4 + (node.importance || 0) * 0.8;
-    node.__fx = node.x + Math.sin(tick * motion.phaseSpeed + node.id.length * 0.37 + node.x * 0.002) * motion.driftAmp * importance;
-    node.__fy = node.y + Math.cos(tick * motion.phaseSpeed * 0.82 + node.id.length * 0.53 + node.y * 0.002) * motion.driftAmp * importance;
+// ---------------------------------------------------------------------------
+// Framing: map simulation coordinates onto the screen
+// ---------------------------------------------------------------------------
+// The layout lives in its own coordinate space. Framing fits it into a target
+// rectangle (fill, centred, left or right third), honouring the safe area,
+// zoom, offset and multi-monitor span. The transform eases toward its target
+// so the graph doesn't jump while the simulation settles.
+let framingDirty = true;
+let framingLastCompute = 0;
+let framingEpoch = 0;
+const frame = { sx: 1, sy: 1, tx: 0, ty: 0, cx: 0, cy: 0, ready: false };
+const frameTarget = { sx: 1, sy: 1, tx: 0, ty: 0, cx: 0, cy: 0 };
+let framingRect = { x: 0, y: 0, w: 0, h: 0 };
+let framingAnimating = false;
+
+function percentileBounds(list) {
+  // Sample for big graphs; 2nd–98th percentile so far-flung orphans don't
+  // shrink the whole picture.
+  const step = Math.max(1, Math.floor(list.length / 4000));
+  const xs = [], ys = [];
+  for (let i = 0; i < list.length; i += step) { xs.push(list[i].x); ys.push(list[i].y); }
+  if (!xs.length) return null;
+  xs.sort((a, b) => a - b); ys.sort((a, b) => a - b);
+  const q = (arr, f) => arr[Math.min(arr.length - 1, Math.max(0, Math.floor(f * (arr.length - 1))))];
+  const lo = xs.length > 40 ? 0.02 : 0, hi = xs.length > 40 ? 0.98 : 1;
+  return { x0: q(xs, lo), x1: q(xs, hi), y0: q(ys, lo), y1: q(ys, hi) };
+}
+
+function computeFramingTarget() {
+  framingLastCompute = performance.now();
+  framingDirty = false;
+  const sa = cfg.safeArea || {};
+  const virtW = innerWidth * SPAN.count;
+  const H = innerHeight;
+  const left = (SPAN.index === 0 ? sa.left || 0 : 0);
+  const right = (SPAN.index === SPAN.count - 1 ? sa.right || 0 : 0);
+  // In span mode safe-area left/right apply to the outer edges of the set.
+  const rx = left + virtW * 0.05;
+  const ry = (sa.top || 0) + H * 0.075;
+  const rw = Math.max(50, virtW - left - right - virtW * 0.1);
+  const rh = Math.max(50, H - (sa.top || 0) - (sa.bottom || 0) - H * 0.15);
+  framingRect = { x: rx - SPAN.index * innerWidth, y: ry, w: rw, h: rh };
+  if (cfg.framing === 'none') {
+    Object.assign(frameTarget, { sx: 1, sy: 1, tx: 0, ty: 0, cx: 0, cy: 0 });
+    return;
+  }
+  const visible = [];
+  for (const n of nodes) if (n.__renderable !== false && hasPoint(n)) visible.push(n);
+  const b = percentileBounds(visible);
+  if (!b) return;
+  const gw = Math.max(1, b.x1 - b.x0), gh = Math.max(1, b.y1 - b.y0);
+  let cx = rx + rw / 2, cy = ry + rh / 2, sx, sy;
+  if (cfg.framing === 'fill') {
+    sx = rw / gw; sy = rh / gh;
+    // Allow some stretch to fill the screen, but not more than 1.6:1.
+    const ratio = sx / sy;
+    if (ratio > 1.6) sx = sy * 1.6;
+    else if (ratio < 1 / 1.6) sy = sx * 1.6;
+  } else if (cfg.framing === 'center') {
+    sx = sy = Math.min(rw / gw, rh / gh) * 0.82;
+  } else {
+    sx = sy = Math.min((rw * 0.58) / gw, rh / gh);
+    cx = rx + rw * (cfg.framing === 'left' ? 0.3 : 0.7);
+  }
+  // Small vaults: don't blow a handful of notes up across the whole screen.
+  const MAX_SCALE = 2.2;
+  if (sx > MAX_SCALE || sy > MAX_SCALE) { const f = MAX_SCALE / Math.max(sx, sy); sx *= f; sy *= f; }
+  const z = cfg.zoom || 1;
+  cx += (cfg.offsetX || 0) * rw * 0.5;
+  cy += (cfg.offsetY || 0) * rh * 0.5;
+  Object.assign(frameTarget, { sx: sx * z, sy: sy * z, cx: (b.x0 + b.x1) / 2, cy: (b.y0 + b.y1) / 2, tx: cx - SPAN.index * innerWidth, ty: cy });
+}
+
+function updateFraming() {
+  const interval = simRunning ? 400 : 4000;
+  if (framingDirty || performance.now() - framingLastCompute > interval || !frame.ready) computeFramingTarget();
+  let moved = false;
+  const k = !frame.ready || ONESHOT || SYNTHETIC_SIZE > 0 ? 1 : 0.18;
+  for (const key of ['sx', 'sy', 'tx', 'ty', 'cx', 'cy']) {
+    const d = frameTarget[key] - frame[key];
+    if (Math.abs(d) > 1e-3 * Math.max(1, Math.abs(frameTarget[key]))) { frame[key] += d * k; moved = true; }
+    else frame[key] = frameTarget[key];
+  }
+  frame.ready = true;
+  framingAnimating = moved;
+  if (moved) { framingEpoch++; invalidateStaticLayer(); }
+}
+
+// ---------------------------------------------------------------------------
+// Per-frame positions
+// ---------------------------------------------------------------------------
+function assignDepthLayers() {
+  const layers = Math.max(2, cfg.depthParallaxLayers || 3);
+  const sorted = nodes.slice().sort((a, b) => (b.importance || 0) - (a.importance || 0));
+  for (let i = 0; i < sorted.length; i++) {
+    sorted[i].__depthLayer = Math.min(layers - 1, Math.floor((i / sorted.length) * layers));
   }
 }
 
+// Layer 0 = front (most important). Back layers drift more slowly and sit
+// dimmer and smaller, which reads as depth.
+function depthLayerParams(layer, totalLayers, strength) {
+  const t = (layer || 0) / Math.max(1, (totalLayers || 3) - 1);
+  return {
+    drift: 1 - t * 0.6 * strength,
+    alpha: 1 - t * 0.5 * strength,
+    size: 1 - t * 0.25 * strength
+  };
+}
+
+const __flow = [0, 0];
+let __viewMinX = 0, __viewMaxX = 0, __viewMinY = 0, __viewMaxY = 0;
+let buildFramePoints = function () {
+  if (simSharedEnabled && simRunning) syncSharedPositions();
+  updateFraming();
+  const motion = sceneTuning.motion;
+  const amp = motion.driftAmp * (activeTheme() ? 0 : 1);
+  const tSec = motionTime() * motion.phaseSpeed * 0.9;
+  const parallax = cfg.depthParallax && !activeTheme();
+  const layers = Math.max(2, cfg.depthParallaxLayers || 3);
+  const strength = cfg.depthParallaxStrength ?? 0.5;
+  const fx = frame.sx, fy = frame.sy, ftx = frame.tx, fty = frame.ty, fcx = frame.cx, fcy = frame.cy;
+  const MARGIN = 100;
+  __viewMinX = -MARGIN; __viewMinY = -MARGIN; __viewMaxX = innerWidth + MARGIN; __viewMaxY = innerHeight + MARGIN;
+  for (let i = 0; i < nodes.length; i++) {
+    const node = nodes[i];
+    node.__vFrame = -1;
+    if (node.__renderable === false || !hasPoint(node)) {
+      node.__hasPoint = false;
+      node.__fx = NaN; node.__fy = NaN;
+      continue;
+    }
+    node.__hasPoint = true;
+    const bx = ftx + (node.x - fcx) * fx;
+    const by = fty + (node.y - fcy) * fy;
+    node.__bx = bx; node.__by = by;
+    let a = amp * (0.4 + (node.importance || 0) * 0.8);
+    if (parallax) {
+      const p = depthLayerParams(node.__depthLayer, layers, strength);
+      a *= p.drift;
+      node.__depthAlpha = p.alpha; node.__depthSize = p.size;
+    } else {
+      node.__depthAlpha = 1; node.__depthSize = 1;
+    }
+    if (a > 0) {
+      flowOffset(bx, by, tSec, __flow);
+      node.__fx = bx + __flow[0] * a;
+      node.__fy = by + __flow[1] * a;
+    } else {
+      node.__fx = bx; node.__fy = by;
+    }
+    if (node.__fx >= __viewMinX && node.__fx <= __viewMaxX && node.__fy >= __viewMinY && node.__fy <= __viewMaxY) node.__vFrame = tick;
+  }
+  __cullFrame = tick;
+};
+
+// Depth of field: precomputed centre and inverse half-diagonal.
+let __dofCx = 0, __dofCy = 0, __dofInv = 1;
+function prepareDof() {
+  __dofCx = innerWidth / 2; __dofCy = innerHeight / 2;
+  __dofInv = 2 / Math.sqrt(innerWidth * innerWidth + innerHeight * innerHeight);
+}
 function distFromCenterPoint(x, y) {
-  const dx = x - innerWidth / 2;
-  const dy = y - innerHeight / 2;
-  const maxDist = Math.sqrt(innerWidth * innerWidth + innerHeight * innerHeight) / 2;
-  return Math.sqrt(dx * dx + dy * dy) / maxDist;
+  const dx = x - __dofCx, dy = y - __dofCy;
+  return Math.sqrt(dx * dx + dy * dy) * __dofInv;
 }
 
 function roundedRectPath(x, y, w, h, r) {
@@ -967,9 +1344,9 @@ function roundedRectPath(x, y, w, h, r) {
   ctx.quadraticCurveTo(x, y, x + radius, y);
 }
 
-async function loadJson(pathname) {
+async function loadJson(pathname, options) {
   try {
-    const response = await fetch(pathname, { cache: 'no-store' });
+    const response = await fetch(pathname, { cache: 'no-store', ...(options || {}) });
     if (!response.ok) return null;
     return await response.json();
   } catch {
@@ -986,18 +1363,22 @@ async function loadCfg() {
   } else {
     const data = await loadJson('/api/config');
     if (data) raw = normalizeConfig(data);
-    else console.warn('config API not available, using defaults');
+    else if (SYNTHETIC_SIZE === 0) console.warn('config API not available, using defaults');
   }
   if (raw) {
     __rawCfg = raw;
-    const nextCfg = applyAutoTheme(raw);
-    // Cross-fade out the previous look on a preset-level change.
+    const nextCfg = computeEffectiveConfig(raw);
+    await ensureTheme(nextCfg.theme);
     if (__hasRendered && isBigVisualChange(prevCfg, nextCfg)) snapshotForFade();
+    const layoutChanged = prevCfg.layout !== nextCfg.layout || prevCfg.clusterByTag !== nextCfg.clusterByTag;
     cfg = nextCfg;
+    if (layoutChanged && nodes.length && SYNTHETIC_SIZE === 0) startSimulation(0.8);
+    if (cfg.depthParallax && nodes.length) assignDepthLayers();
   }
   applyBackground();
   refreshSceneTuning();
-  invalidateStaticLayer();
+  applyPostLayers();
+  markConfigChanged();
   if (!eventSource && stateSyncTimer && prevRefreshMs !== cfg.refreshMs) {
     startStateSync();
   }
@@ -1005,21 +1386,13 @@ async function loadCfg() {
 
 // Fetch canonical defaults once at boot so normalizeConfig never drifts.
 (async () => {
+  if (SYNTHETIC_SIZE > 0) return;
   const defaults = await loadJson('/api/defaults');
-  if (defaults && isPlainObject(defaults)) {
-    Object.assign(DEFAULTS, defaults);
-  }
+  if (defaults && isPlainObject(defaults)) Object.assign(DEFAULTS, defaults);
 })();
 
 function graphHash(graph) {
   return cfg.fastHash === false ? graphHashSlow(graph) : graphHashFast(graph);
-}
-
-function randomPosition(spread) {
-  return {
-    x: innerWidth / 2 + (Math.random() - 0.5) * spread,
-    y: innerHeight / 2 + (Math.random() - 0.5) * spread
-  };
 }
 
 function ensureSimWorker() {
@@ -1036,6 +1409,7 @@ function ensureSimWorker() {
     if (!msg) return;
     if (msg.generation !== simGeneration) return; // stale tick from previous graph
     if (msg.type !== 'tick' && msg.type !== 'stopped') return;
+    lastSimMessageAt = performance.now();
     if (msg.buffer) {
       const buf = new Float32Array(msg.buffer);
       const len = Math.min(nodes.length, (msg.count | 0) || (buf.length >> 1));
@@ -1049,207 +1423,273 @@ function ensureSimWorker() {
     }
     simAlpha = msg.alpha || 0;
     if (msg.type === 'stopped') {
+      if (simSharedEnabled) syncSharedPositions();
       simRunning = false;
       simSharedEnabled = false;
       simSharedPositions = null;
-      rebuildQuadtree();
+      framingDirty = true;
       invalidateStaticLayer();
+      sceneDirty = true;
+      wake();
     }
   };
-  simWorker.onerror = (err) => { console.warn('sim worker error:', err.message || err); };
+  simWorker.onerror = (err) => {
+    console.warn('sim worker error:', err.message || err);
+    recoverFromWorkerFailure();
+  };
   return simWorker;
 }
 
-async function loadGraph(options = {}) {
+// If the worker dies (failed to load, threw mid-run) no 'stopped' message
+// ever arrives and simRunning would keep the page at full frame rate forever.
+// Fall back to settling on the main thread.
+let simWatchdog = null;
+function recoverFromWorkerFailure() {
+  if (simWatchdog) { clearTimeout(simWatchdog); simWatchdog = null; }
+  try { if (simWorker) simWorker.terminate(); } catch (_) {}
+  simWorker = null;
+  if (!simRunning) return;
+  simSharedEnabled = false;
+  simSharedPositions = null;
+  try { settleSynchronously(Math.max(0.3, simAlpha || 1)); } catch (e) { simRunning = false; }
+  simRunning = false;
+  sceneDirty = true;
+  markConfigChanged();
+}
+function armSimWatchdog() {
+  if (simWatchdog) clearTimeout(simWatchdog);
+  simWatchdog = setTimeout(() => {
+    simWatchdog = null;
+    if (simRunning && performance.now() - lastSimMessageAt > 15000) recoverFromWorkerFailure();
+    else if (simRunning) armSimWatchdog();
+  }, 16000);
+}
+let lastSimMessageAt = 0;
+
+// Starts (or warm-restarts) the layout. alpha < 1 keeps the existing layout
+// and only lets it relax around what changed.
+function startSimulation(alpha) {
+  if (!nodes.length) return;
+  if (ONESHOT) { settleSynchronously(alpha); return; }
+  ensureSimWorker();
+  if (!simWorker) { settleSynchronously(alpha); return; }
+  simRunning = true;
+  simAlpha = alpha;
+  simGeneration += 1;
+  simSharedEnabled = !!(window.crossOriginIsolated && typeof SharedArrayBuffer !== 'undefined');
+  simSharedPositions = simSharedEnabled
+    ? new Float32Array(new SharedArrayBuffer(Float32Array.BYTES_PER_ELEMENT * nodes.length * 2))
+    : null;
+  const workerNodes = new Array(nodes.length);
+  for (let i = 0; i < nodes.length; i++) {
+    const n = nodes[i];
+    workerNodes[i] = { id: n.id, tag: n.tag || null, ghost: !!n.ghost, mtime: n.mtime || 0, r: n.r, x: n.x, y: n.y, vx: n.vx || 0, vy: n.vy || 0 };
+  }
+  const workerLinks = new Array(links.length);
+  for (let i = 0; i < links.length; i++) {
+    const l = links[i];
+    workerLinks[i] = { source: typeof l.source === 'object' ? l.source.id : l.source, target: typeof l.target === 'object' ? l.target.id : l.target };
+  }
+  simWorker.postMessage({
+    type: 'start',
+    generation: simGeneration,
+    nodes: workerNodes,
+    links: workerLinks,
+    clusterByTag: !!cfg.clusterByTag,
+    layout: cfg.layout,
+    alpha,
+    width: innerWidth,
+    height: innerHeight,
+    now: Date.now(),
+    sharedBuffer: simSharedPositions ? simSharedPositions.buffer : null,
+    centerX: innerWidth / 2,
+    centerY: innerHeight / 2
+  });
+  lastSimMessageAt = performance.now();
+  armSimWatchdog();
+  framingDirty = true;
+  markConfigChanged();
+  invalidateStaticLayer();
+}
+
+// Captures (oneshot, synthetic, export without a worker) settle the layout on
+// the main thread with the same code the worker runs.
+function settleSynchronously(alpha) {
+  if (typeof d3 === 'undefined' || !nodes.length) return;
+  const simNodes = nodes.map(n => ({ id: n.id, tag: n.tag || null, ghost: !!n.ghost, mtime: n.mtime || 0, r: n.r, x: n.x, y: n.y, vx: 0, vy: 0 }));
+  const simLinks = links.map(l => ({ source: l.source.id || l.source, target: l.target.id || l.target }));
+  const sim = LayoutCore.createSimulation(d3, simNodes, simLinks, {
+    layout: cfg.layout, width: innerWidth, height: innerHeight, centerX: innerWidth / 2, centerY: innerHeight / 2,
+    clusterByTag: !!cfg.clusterByTag, alpha: alpha || 1, now: Date.now()
+  });
+  LayoutCore.settle(sim, nodes.length > 2500 ? 120 : 300);
+  for (let i = 0; i < nodes.length; i++) { nodes[i].x = simNodes[i].x; nodes[i].y = simNodes[i].y; }
+  simRunning = false;
+  simAlpha = 0;
+  framingDirty = true;
+  invalidateStaticLayer();
+}
+
+function topologyOf(graph) {
+  // Ids, tags and links: what the layout depends on. mtime/label/folder
+  // changes (e.g. editing a note's body) don't move anything.
+  return graphHash({ nodes: graph.nodes, links: graph.links }) + ':' + (cfg.layout || 'force');
+}
+
+async function fetchGraph() {
+  if (SYNTHETIC_SIZE > 0) return buildSyntheticGraph(SYNTHETIC_SIZE);
   try {
-    const force = !!options.force;
-    const graph = SYNTHETIC_SIZE > 0
-      ? buildSyntheticGraph(SYNTHETIC_SIZE)
-      : await loadJson('graph.json');
+    // 'no-cache' revalidates with If-None-Match; an unchanged graph comes back
+    // as a cached 304 and is skipped without re-parsing.
+    const res = await fetch('graph.json', { cache: 'no-cache' });
+    if (!res.ok) return null;
+    const etag = res.headers.get('ETag') || '';
+    if (etag && etag === lastGraphEtag && nodes.length) return 'unchanged';
+    const graph = await res.json();
+    // Remembered only once the graph is actually applied (end of loadGraph),
+    // so a failed parse can't pin a stale graph behind a matching ETag.
+    if (graph) graph.__etag = etag;
+    return graph;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function loadGraph() {
+  try {
+    const graph = await fetchGraph();
+    if (graph === 'unchanged') return;
     if (!graph?.nodes || !graph?.links) return;
-    if (!force) {
-      const hash = graphHash(graph);
-      if (hash === lastHash) return;
-      lastHash = hash;
-    } else {
-      lastHash = graphHash(graph);
-    }
 
     const newIds = new Set(graph.nodes.map(node => node.id));
     detectNewNodes(newIds);
+    const nextTopology = topologyOf(graph);
+    const topologyChanged = nextTopology !== topologyHash;
+    topologyHash = nextTopology;
 
     const previousNodes = new Map(nodes.map(node => [node.id, node]));
-    const spread = Math.min(innerWidth, innerHeight) * 0.4;
+    let kept = 0;
     nodes = graph.nodes.map(node => {
       const previous = previousNodes.get(node.id);
-      const presetX = finiteNumber(node.x) ? node.x : null;
-      const presetY = finiteNumber(node.y) ? node.y : null;
-      const fallback = presetX !== null ? { x: presetX, y: presetY } : randomPosition(spread);
-      const nextNode = previous
-        ? Object.assign(previous, {
-            tag: node.tag,
-            ghost: node.ghost || false,
-            label: node.label,
-            mtime: node.mtime || 0,
-            x: finiteNumber(previous.x) ? previous.x : fallback.x,
-            y: finiteNumber(previous.y) ? previous.y : fallback.y,
-            vx: finiteNumber(previous.vx) ? previous.vx : 0,
-            vy: finiteNumber(previous.vy) ? previous.vy : 0
-          })
-        : { ...node, ghost: node.ghost || false, ...fallback, vx: 0, vy: 0 };
-      
-      nextNode.__depthLayer = 0; // Default layer
-      if (cfg.glowBreathing) {
-        nextNode.__breathOffset = hashStr(nextNode.id) % (Math.PI * 2 * 1000) / 1000;
+      if (previous) {
+        kept++;
+        return Object.assign(previous, {
+          tag: node.tag, tags: node.tags, ghost: node.ghost || false, label: node.label,
+          mtime: node.mtime || 0, folder: node.folder
+        });
       }
-      return nextNode;
+      const fresh = { ...node, ghost: node.ghost || false, vx: 0, vy: 0, __new: true };
+      if (!finiteNumber(fresh.x)) { fresh.x = NaN; fresh.y = NaN; }
+      return fresh;
     });
-    links = graph.links;
     for (let i = 0; i < nodes.length; i++) nodes[i].__index = i;
-    
-    // Assign depth layers based on importance, for depth parallax effect.
-    if (cfg.depthParallax && nodes.length > 0) {
-      assignDepthLayers();
+
+    const nodeById = new Map();
+    for (let i = 0; i < nodes.length; i++) nodeById.set(nodes[i].id, nodes[i]);
+    links = [];
+    for (const l of graph.links) {
+      const s = nodeById.get(typeof l.source === 'object' ? l.source.id : l.source);
+      const t = nodeById.get(typeof l.target === 'object' ? l.target.id : l.target);
+      if (s && t) links.push({ source: s, target: t });
     }
-    
+
+    // Seed new notes next to the notes they link to (or near the centre of
+    // the layout), so they appear in place instead of flying in.
+    const spread = Math.min(innerWidth, innerHeight) * 0.4;
+    let seeded = 0;
+    for (const n of nodes) {
+      if (!n.__new) continue;
+      let sx = 0, sy = 0, c = 0;
+      for (const l of links) {
+        const o = l.source === n ? l.target : l.target === n ? l.source : null;
+        if (o && !o.__new && hasPoint(o)) { sx += o.x; sy += o.y; c++; }
+      }
+      if (c) { n.x = sx / c + (Math.random() - 0.5) * 20; n.y = sy / c + (Math.random() - 0.5) * 20; seeded++; }
+    }
+    for (const n of nodes) {
+      if (n.__new && !hasPoint(n)) { n.x = innerWidth / 2 + (Math.random() - 0.5) * spread; n.y = innerHeight / 2 + (Math.random() - 0.5) * spread; }
+      delete n.__new;
+    }
+
     for (let i = 0; i < particlePool.length; i++) {
       const p = particlePool[i];
-      if (!p.active) continue;
-      const source = p.link?.source?.id || p.link?.source;
-      const target = p.link?.target?.id || p.link?.target;
-      if (!newIds.has(source) || !newIds.has(target)) {
-        p.active = false;
-        p.link = null;
+      if (p.active && (!newIds.has(p.link?.source?.id) || !newIds.has(p.link?.target?.id))) {
+        p.active = false; p.link = null; activeParticleCount--;
       }
     }
 
-    const degree = {};
-    links.forEach(link => {
-      degree[link.source] = (degree[link.source] || 0) + 1;
-      degree[link.target] = (degree[link.target] || 0) + 1;
-    });
+    const degree = new Map();
+    for (const link of links) {
+      degree.set(link.source, (degree.get(link.source) || 0) + 1);
+      degree.set(link.target, (degree.get(link.target) || 0) + 1);
+    }
     let dMax = 1;
-    for (const v of Object.values(degree)) { if (v > dMax) dMax = v; }
+    for (const v of degree.values()) if (v > dMax) dMax = v;
     maxDeg = dMax;
-    nodes.forEach(node => {
-      const degreeCount = degree[node.id] || 0;
+    for (const node of nodes) {
+      const degreeCount = degree.get(node) || 0;
       node.deg = degreeCount;
       node.r = node.ghost ? 1.5 + Math.sqrt(degreeCount) * 0.8 : 2.2 + Math.sqrt(degreeCount) * 1.45;
       node.importance = Math.min(1, degreeCount / maxDeg);
-    });
-    __rankValid = false; // node set / importances changed; rebuild the ranking lazily
-
-    // Resolve link source/target strings to node object refs. d3.forceLink
-    // used to do this on the main thread; the worker now owns the sim, so we
-    // replicate it here for draw/particle code that expects node references.
-    const nodeById = new Map();
-    for (let i = 0; i < nodes.length; i++) nodeById.set(nodes[i].id, nodes[i]);
-    for (let i = 0; i < links.length; i++) {
-      const link = links[i];
-      if (typeof link.source === 'string') link.source = nodeById.get(link.source) || link.source;
-      if (typeof link.target === 'string') link.target = nodeById.get(link.target) || link.target;
     }
-
+    __rankValid = false;
+    // Depth layers need importance, so they are assigned after it is known.
+    assignDepthLayers();
+    graphEpoch++;
     refreshAgeStats();
     refreshSceneTuning();
+    if (cfg.overlay === 'stats') renderOverlay();
 
     if (SYNTHETIC_SIZE > 0) {
-      // Synthetic mode pre-lays nodes out; skip the worker sim entirely so
-      // headless screenshots capture a stable frame on first paint.
+      // Pre-settle synthetic graphs with the real layout (small/medium), or a
+      // cheap spiral for huge ones, so captures need no worker.
+      if (SYNTHETIC_SIZE <= 3000) settleSynchronously(1);
+      else spiralLayout();
       simRunning = false;
       simAlpha = 0;
-      simSharedEnabled = false;
-      simSharedPositions = null;
-      sim = { alpha: () => 0, stop: () => {} };
       markConfigChanged();
-      invalidateStaticLayer();
       return;
     }
-
-    ensureSimWorker();
-    if (sim) sim.stop();
-    simRunning = true;
-    simAlpha = 1;
-    simGeneration += 1;
-    simSharedEnabled = !!(window.crossOriginIsolated && typeof SharedArrayBuffer !== 'undefined');
-    simSharedPositions = simSharedEnabled
-      ? new Float32Array(new SharedArrayBuffer(Float32Array.BYTES_PER_ELEMENT * nodes.length * 2))
-      : null;
+    if (topologyChanged) {
+      // Warm restart when most notes already have positions: the layout only
+      // relaxes around what changed instead of re-shuffling everything.
+      const warm = kept > 0 && kept >= nodes.length * 0.8;
+      startSimulation(warm ? 0.25 : 1);
+    }
+    sceneDirty = true;
+    if (graph.__etag) lastGraphEtag = graph.__etag;
     markConfigChanged();
-    invalidateStaticLayer();
-
-    // Provide a shim so the rest of the code can still call sim.stop()/alpha().
-    sim = {
-      alpha: () => simAlpha,
-      stop: () => {
-        simRunning = false;
-        if (simWorker) simWorker.postMessage({ type: 'stop' });
-      }
-    };
-
-    const workerNodes = new Array(nodes.length);
-    for (let i = 0; i < nodes.length; i++) {
-      const n = nodes[i];
-      workerNodes[i] = {
-        id: n.id,
-        tag: n.tag || null,
-        r: n.r,
-        x: n.x, y: n.y,
-        vx: n.vx || 0, vy: n.vy || 0
-      };
-    }
-    const workerLinks = new Array(links.length);
-    for (let i = 0; i < links.length; i++) {
-      const l = links[i];
-      const s = typeof l.source === 'object' ? l.source.id : l.source;
-      const t = typeof l.target === 'object' ? l.target.id : l.target;
-      workerLinks[i] = { source: s, target: t };
-    }
-    simWorker.postMessage({
-      type: 'start',
-      generation: simGeneration,
-      nodes: workerNodes,
-      links: workerLinks,
-      clusterByTag: !!cfg.clusterByTag,
-      sharedBuffer: simSharedPositions ? simSharedPositions.buffer : null,
-      centerX: innerWidth / 2,
-      centerY: innerHeight / 2
-    });
   } catch (error) {
     console.warn('load failed:', error.message);
   }
 }
 
-function assignDepthLayers() {
-  if (!cfg.depthParallax || nodes.length === 0) return;
-  const layers = cfg.depthParallaxLayers || 3;
-  // Sort by importance descending, assign tiers
-  const sorted = nodes.slice().sort((a, b) => (b.importance || 0) - (a.importance || 0));
-  for (let i = 0; i < sorted.length; i++) {
-    const tier = Math.min(layers - 1, Math.floor((i / sorted.length) * layers));
-    sorted[i].__depthLayer = tier;
+function spiralLayout() {
+  const cx = innerWidth / 2, cy = innerHeight / 2;
+  const maxR = Math.min(innerWidth, innerHeight) * 0.42;
+  const PHI = Math.PI * (3 - Math.sqrt(5));
+  const ranks = LayoutCore.tagRanks(nodes).rank;
+  const tagCount = Math.max(1, ranks.size);
+  for (let i = 0; i < nodes.length; i++) {
+    const n = nodes[i];
+    const ti = ranks.get(n.tag || '') || 0;
+    const a = (ti / tagCount) * Math.PI * 2;
+    const radius = Math.sqrt(i / nodes.length) * maxR * 0.6;
+    n.x = cx + Math.cos(a) * maxR * 0.28 + Math.cos(i * PHI) * radius;
+    n.y = cy + Math.sin(a) * maxR * 0.28 + Math.sin(i * PHI) * radius;
   }
 }
 
-function getDepthLayerParams(layer, totalLayers, strength) {
-  const t = (layer || 1) / Math.max(1, (totalLayers || 3) - 1);
-  return {
-    driftMultiplier: 1 + (1 - t) * 0.4 * strength,
-    saturationScale: 1 - t * 0.4 * strength,
-    alphaScale: 1 - t * 0.5 * strength,
-    sizeScale: 1 - t * 0.2 * strength
-  };
-}
-
+const flares = new Map(); // id -> { start (ms), duration (ms) }
+let prevNodeIds = new Set();
 function detectNewNodes(newIds) {
   if (prevNodeIds.size === 0) {
     prevNodeIds = newIds;
     return;
   }
+  const now = performance.now();
   for (const id of newIds) {
-    if (!prevNodeIds.has(id)) {
-      flares.set(id, { start: tick, duration: 90 });
-    }
+    if (!prevNodeIds.has(id)) flares.set(id, { start: now, duration: 1500 });
   }
   for (const id of flares.keys()) {
     if (!newIds.has(id)) flares.delete(id);
@@ -1257,12 +1697,10 @@ function detectNewNodes(newIds) {
   prevNodeIds = newIds;
 }
 
-const flares = new Map();
-
 function getFlareIntensity(nodeId) {
   if (!sceneTuning.noteFlareEnabled || !flares.has(nodeId)) return 0;
   const flare = flares.get(nodeId);
-  const age = tick - flare.start;
+  const age = performance.now() - flare.start;
   if (age > flare.duration) {
     flares.delete(nodeId);
     return 0;
@@ -1270,17 +1708,25 @@ function getFlareIntensity(nodeId) {
   const t = age / flare.duration;
   return t < 0.15 ? t / 0.15 : 1 - ((t - 0.15) / 0.85);
 }
-function spawnParticles() {
-  if (!sceneTuning.particlesEnabled) return;
+
+// ---------------------------------------------------------------------------
+// Particles (edge flow) — time-based so speed doesn't depend on frame rate
+// ---------------------------------------------------------------------------
+let __lastParticleSpawn = 0;
+function spawnParticles(now) {
+  if (!sceneTuning.particlesEnabled || !links.length) return;
+  const every = sceneTuning.motion.particleSpawnEvery * 16.67;
+  if (now - __lastParticleSpawn < every) return;
+  __lastParticleSpawn = now;
   const desired = Math.min(sceneTuning.particleCap, Math.floor(links.length * cfg.particleDensity * 0.7));
+  if (activeParticleCount >= desired) return;
+  const burst = Math.min(sceneTuning.motion.particleBurst, desired - activeParticleCount);
   let spawned = 0;
-  // TODO: better heuristic for spawn burst rate based on `desired` and current count.
-  const burst = Math.min(sceneTuning.motion.particleBurst, desired);
   for (let i = 0; i < particlePool.length && spawned < burst; i++) {
     const slot = particlePool[i];
     if (slot.active) continue;
     const link = links[Math.floor(Math.random() * links.length)];
-    if (!link || !link.source || !link.target) continue;
+    if (!link || link.source.__renderable === false || link.target.__renderable === false) continue;
     slot.active = true;
     slot.link = link;
     slot.t = 0;
@@ -1292,11 +1738,11 @@ function spawnParticles() {
   }
 }
 
-function updateParticles() {
+function updateParticles(dtTicks) {
   for (let i = 0; i < particlePool.length; i++) {
     const p = particlePool[i];
     if (!p.active) continue;
-    p.t += p.speed;
+    p.t += p.speed * dtTicks;
     if (p.t >= 1) {
       p.active = false;
       p.link = null;
@@ -1305,20 +1751,19 @@ function updateParticles() {
   }
 }
 
-function drawParticles() {
+let drawParticles = function () {
   if (!sceneTuning.particlesEnabled) return;
-  // Group by color so fillStyle is set once per color; per-particle alpha is
-  // applied via globalAlpha, avoiding an rgba() string allocation per particle.
-  particleDrawGroups.clear();
+  // Group by colour so fillStyle is set once per colour; per-particle alpha is
+  // applied via globalAlpha.
+  for (const arr of particleDrawGroups.values()) arr.length = 0;
   for (let i = 0; i < particlePool.length; i++) {
     const particle = particlePool[i];
     if (!particle.active) continue;
     const source = particle.link.source;
     const target = particle.link.target;
-    if (!finiteNumber(source.__fx) || !finiteNumber(source.__fy) || !finiteNumber(target.__fx) || !finiteNumber(target.__fy)) continue;
+    if (!finiteNumber(source.__fx) || !finiteNumber(target.__fx)) continue;
     const x = source.__fx + (target.__fx - source.__fx) * particle.t;
     const y = source.__fy + (target.__fy - source.__fy) * particle.t;
-    if (!finiteNumber(x) || !finiteNumber(y)) continue;
     const color = sceneTuning.edgeColoringEnabled ? edgeColor(particle.link) : cfg.accent;
     const fade = particle.t < 0.1 ? particle.t / 0.1 : particle.t > 0.88 ? (1 - particle.t) / 0.12 : 1;
     let arr = particleDrawGroups.get(color);
@@ -1326,6 +1771,7 @@ function drawParticles() {
     arr.push(x, y, particle.size, particle.alpha * fade);
   }
   for (const [color, arr] of particleDrawGroups) {
+    if (!arr.length) continue;
     ctx.fillStyle = color;
     for (let i = 0; i < arr.length; i += 4) {
       ctx.globalAlpha = Math.min(1, arr[i + 3]);
@@ -1335,55 +1781,43 @@ function drawParticles() {
     }
   }
   ctx.globalAlpha = 1;
-}
+};
 
-let ambientPool = [];
+// Ambient particles: slow dust drifting across the whole screen.
 function initAmbientParticles() {
   ambientPool = [];
-  if (!cfg.ambientParticles) return;
-  for (let i = 0; i < cfg.ambientParticleCount; i++) {
+  if (!cfg.ambientParticles || REDUCED_MOTION) return;
+  const count = Math.max(0, Math.min(300, cfg.ambientParticleCount | 0));
+  for (let i = 0; i < count; i++) {
     ambientPool.push({
       x: Math.random() * innerWidth,
       y: Math.random() * innerHeight,
       vx: (Math.random() - 0.5) * cfg.ambientParticleSpeed,
       vy: (Math.random() - 0.5) * cfg.ambientParticleSpeed,
-      driftX: 0,
-      driftY: 0,
       phase: Math.random() * Math.PI * 2,
       size: cfg.ambientParticleSize * (0.6 + Math.random() * 0.8),
-      alpha: 0.3 + Math.random() * 0.7
+      alpha: 0.25 + Math.random() * 0.5
     });
   }
 }
 
-function updateAmbientParticles() {
-  if (!cfg.ambientParticles) return;
-  const driftAmp = sceneTuning.motion.driftAmp * cfg.depthParallaxStrength * (cfg.depthParallax ? 0.3 : 1);
-  for (let i = 0; i < ambientPool.length; i++) {
-    const p = ambientPool[i];
-    p.driftX = Math.cos(tick * 0.00012 + p.phase) * driftAmp * 0.6;
-    p.driftY = Math.sin(tick * 0.00015 + p.phase) * driftAmp * 0.6;
-    p.x += p.vx * 0.6 + p.driftX;
-    p.y += p.vy * 0.6 + p.driftY;
+function updateAmbientParticles(dtTicks) {
+  if (!ambientPool.length) return;
+  const t = motionTime();
+  const drift = sceneTuning.motion.driftAmp * 0.25;
+  for (const p of ambientPool) {
+    p.x += (p.vx * 0.6 + Math.cos(t * 0.004 + p.phase) * drift * 0.2) * dtTicks;
+    p.y += (p.vy * 0.6 + Math.sin(t * 0.005 + p.phase) * drift * 0.2) * dtTicks;
     p.x = (p.x + innerWidth) % innerWidth;
     p.y = (p.y + innerHeight) % innerHeight;
   }
 }
 
-let __ambientColor = null;
-function computeAmbientParticleColor() {
-  if (__ambientColor) return __ambientColor;
-  __ambientColor = colorTint(cfg.accent, 0.4);
-  return __ambientColor;
-}
-
 function drawAmbientParticles() {
-  if (!cfg.ambientParticles || REDUCED_MOTION) return;
-  const color = computeAmbientParticleColor();
-  ctx.fillStyle = color;
-  for (let i = 0; i < ambientPool.length; i++) {
-    const p = ambientPool[i];
-    ctx.globalAlpha = p.alpha * simAlpha;
+  if (!ambientPool.length) return;
+  ctx.fillStyle = mixHex(cfg.accent, themeIsDark() ? '#ffffff' : cfg.background, 0.4);
+  for (const p of ambientPool) {
+    ctx.globalAlpha = p.alpha;
     ctx.beginPath();
     ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
     ctx.fill();
@@ -1393,48 +1827,32 @@ function drawAmbientParticles() {
 
 function buildClusterHalos() {
   if (sceneTuning.haloAlpha <= 0) return [];
-  const currentAlpha = simAlpha;
-  if (cachedHalos && Math.abs(currentAlpha - cachedHalosForAlpha) < 0.05) {
-    return cachedHalos;
-  }
+  if (cachedHalos) return cachedHalos;
   const clusters = new Map();
-  nodes.forEach(node => {
-    if (!node.tag) return;
-    if (!finiteNumber(node.__fx) || !finiteNumber(node.__fy)) return;
-    if (!clusters.has(node.tag)) {
-      clusters.set(node.tag, {
-        tag: node.tag,
-        color: nodeColor(node),
-        count: 0,
-        sumX: 0,
-        sumY: 0,
-        minX: node.__fx,
-        maxX: node.__fx,
-        minY: node.__fy,
-        maxY: node.__fy
-      });
+  for (const node of nodes) {
+    if (!node.tag || !finiteNumber(node.__bx)) continue;
+    let cluster = clusters.get(node.tag);
+    if (!cluster) {
+      cluster = { color: nodeColor(node), count: 0, sumX: 0, sumY: 0, minX: node.__bx, maxX: node.__bx, minY: node.__by, maxY: node.__by };
+      clusters.set(node.tag, cluster);
     }
-    const cluster = clusters.get(node.tag);
     cluster.count += 1;
-    cluster.sumX += node.__fx;
-    cluster.sumY += node.__fy;
-    cluster.minX = Math.min(cluster.minX, node.__fx);
-    cluster.maxX = Math.max(cluster.maxX, node.__fx);
-    cluster.minY = Math.min(cluster.minY, node.__fy);
-    cluster.maxY = Math.max(cluster.maxY, node.__fy);
-  });
+    cluster.sumX += node.__bx;
+    cluster.sumY += node.__by;
+    if (node.__bx < cluster.minX) cluster.minX = node.__bx;
+    if (node.__bx > cluster.maxX) cluster.maxX = node.__bx;
+    if (node.__by < cluster.minY) cluster.minY = node.__by;
+    if (node.__by > cluster.maxY) cluster.maxY = node.__by;
+  }
   cachedHalos = Array.from(clusters.values())
     .filter(cluster => cluster.count >= 3)
     .map(cluster => {
-      const centerX = cluster.sumX / cluster.count;
-      const centerY = cluster.sumY / cluster.count;
       const width = cluster.maxX - cluster.minX;
       const height = cluster.maxY - cluster.minY;
       const radius = Math.max(56, (Math.max(width, height) * 0.72 + Math.sqrt(cluster.count) * 22) * sceneTuning.haloRadiusBoost);
-      return { ...cluster, x: centerX, y: centerY, radius };
+      return { color: cluster.color, x: cluster.sumX / cluster.count, y: cluster.sumY / cluster.count, radius };
     })
     .sort((a, b) => a.radius - b.radius);
-  cachedHalosForAlpha = currentAlpha;
   return cachedHalos;
 }
 
@@ -1446,19 +1864,9 @@ function drawBackgroundGradient(g) {
   const cy = innerHeight / 2;
   const radius = Math.max(innerWidth, innerHeight) * 0.72;
   const gradient = g.createRadialGradient(cx, cy, 0, cx, cy, radius);
-  gradient.addColorStop(0, rgba(
-    mixChannel(br, ar, 0.15),
-    mixChannel(bgg, ag, 0.15),
-    mixChannel(bb, ab, 0.15),
-    1
-  ));
+  gradient.addColorStop(0, rgba(mixChannel(br, ar, 0.15), mixChannel(bgg, ag, 0.15), mixChannel(bb, ab, 0.15), 1));
   gradient.addColorStop(0.5, rgba(br, bgg, bb, 1));
-  gradient.addColorStop(1, rgba(
-    Math.max(0, br - 5),
-    Math.max(0, bgg - 5),
-    Math.max(0, bb - 5),
-    1
-  ));
+  gradient.addColorStop(1, rgba(Math.max(0, br - 5), Math.max(0, bgg - 5), Math.max(0, bb - 5), 1));
   g.fillStyle = gradient;
   g.fillRect(0, 0, innerWidth, innerHeight);
 }
@@ -1477,298 +1885,285 @@ function drawClusterHalos(g) {
   }
 }
 
-function drawEdges() {
+// Edge batches are reused when nothing moved (no drift, sim settled).
+let edgeCacheKey = '';
+let drawEdges = function () {
   const style = sceneTuning.edgeStyle || cfg.edgeStyle || 'line';
   if (style === 'none') return;
-  const edgeCap = sceneTuning.maxRenderedNodes || 0;
-  const cullActive = __cullFrame === tick;
-  edgeGroups.clear();
-  for (let i = 0; i < links.length; i += sceneTuning.linkStep) {
-    const link = links[i];
-    if (edgeCap && (link.source.__renderable === false || link.target.__renderable === false)) continue;
-    if (cullActive && link.source.__vFrame !== tick && link.target.__vFrame !== tick) continue;
-    if (!finiteNumber(link.source.__fx) || !finiteNumber(link.source.__fy) || !finiteNumber(link.target.__fx) || !finiteNumber(link.target.__fy)) continue;
-    const importance = Math.max(link.source.importance || 0, link.target.importance || 0);
-    let alpha = cfg.linkOpacity * sceneTuning.linkOpacityScale * (0.3 + importance * 0.7);
-    let lineWidth = 0.4 + importance * 0.6;
-    if (sceneTuning.depthOfFieldEnabled) {
-      const avgDist = (distFromCenterPoint(link.source.__fx, link.source.__fy) + distFromCenterPoint(link.target.__fx, link.target.__fy)) / 2;
-      const dofMultiplier = 1 - avgDist * 0.5;
-      alpha *= dofMultiplier;
-      lineWidth *= dofMultiplier;
+  const motionless = sceneTuning.motion.driftAmp === 0 || REDUCED_MOTION;
+  const key = motionless && !simRunning ? `${graphEpoch}|${framingEpoch}|${tick > 0}|${renderScale}|${configStamp}` : '';
+  if (!key || key !== edgeCacheKey) {
+    edgeCacheKey = key;
+    for (const byColor of edgeGroups.values()) for (const g of byColor.values()) g.segments.length = 0;
+    const dof = sceneTuning.depthOfFieldEnabled;
+    for (let i = 0; i < links.length; i += sceneTuning.linkStep) {
+      const link = links[i];
+      const s = link.source, t = link.target;
+      if (s.__vFrame !== tick && t.__vFrame !== tick) continue;
+      if (!s.__hasPoint || !t.__hasPoint) continue;
+      const importance = Math.max(s.importance || 0, t.importance || 0);
+      let alpha = cfg.linkOpacity * sceneTuning.linkOpacityScale * (0.3 + importance * 0.7);
+      if (s.__dim && t.__dim) alpha *= 0.25;
+      let lineWidth = 0.4 + importance * 0.6;
+      if (dof) {
+        const avgDist = (distFromCenterPoint(s.__fx, s.__fy) + distFromCenterPoint(t.__fx, t.__fy)) / 2;
+        const m = 1 - avgDist * 0.5;
+        alpha *= m;
+        lineWidth *= m;
+      }
+      const color = edgeColor(link);
+      const alphaBucket = Math.max(1, Math.min(8, Math.round(alpha * 8)));
+      const widthIdx = lineWidth < 0.75 ? 0 : lineWidth < 1.1 ? 1 : 2;
+      let byColor = edgeGroups.get(color);
+      if (!byColor) { byColor = new Map(); edgeGroups.set(color, byColor); }
+      const bucketIdx = (alphaBucket - 1) * 3 + widthIdx;
+      let group = byColor.get(bucketIdx);
+      if (!group) {
+        group = { color, alpha: alphaBucket / 8, lineWidth: WIDTH_BUCKETS[widthIdx], segments: [] };
+        byColor.set(bucketIdx, group);
+      }
+      group.segments.push(s.__fx, s.__fy, t.__fx, t.__fy);
     }
-    const color = edgeColor(link);
-    const alphaBucket = Math.max(1, Math.min(8, Math.round(alpha * 8)));
-    const widthIdx = lineWidth < 0.75 ? 0 : lineWidth < 1.1 ? 1 : 2;
-    // Nested color -> bucket map avoids allocating a fresh string key per link
-    // every frame (up to ~120k throwaway strings/frame on large vaults). Style
-    // is constant per call, so it isn't part of the key. Output is identical.
-    let byColor = edgeGroups.get(color);
-    if (!byColor) { byColor = new Map(); edgeGroups.set(color, byColor); }
-    const bucketIdx = (alphaBucket - 1) * 3 + widthIdx;
-    let group = byColor.get(bucketIdx);
-    if (!group) {
-      group = { color, alpha: alphaBucket / 8, lineWidth: WIDTH_BUCKETS[widthIdx], segments: [] };
-      byColor.set(bucketIdx, group);
-    }
-    group.segments.push(
-      link.source.__fx,
-      link.source.__fy,
-      link.target.__fx,
-      link.target.__fy
-    );
   }
   const isCurve = style === 'curve';
-  for (const [, byColor] of edgeGroups)
-  for (const [, group] of byColor) {
-    ctx.strokeStyle = group.color;
-    ctx.globalAlpha = Math.min(1, group.alpha);
-    ctx.lineWidth = group.lineWidth;
-    ctx.beginPath();
-    for (let i = 0; i < group.segments.length; i += 4) {
-      const x1 = group.segments[i];
-      const y1 = group.segments[i + 1];
-      const x2 = group.segments[i + 2];
-      const y2 = group.segments[i + 3];
-      ctx.moveTo(x1, y1);
-      if (isCurve) {
-        // Quadratic curve with a perpendicular offset so clustered groups
-        // read as soft contour bands instead of a straight-line mesh.
-        const mx = (x1 + x2) * 0.5;
-        const my = (y1 + y2) * 0.5;
-        const dx = x2 - x1;
-        const dy = y2 - y1;
-        const len = Math.sqrt(dx * dx + dy * dy) || 1;
-        // Stable sign from endpoint coordinates so curves don't jitter frame-to-frame.
-        const sign = ((x1 * 131 + y2 * 17) | 0) & 1 ? 1 : -1;
-        const bow = Math.min(60, len * 0.22) * sign;
-        ctx.quadraticCurveTo(mx + (-dy / len) * bow, my + (dx / len) * bow, x2, y2);
-      } else {
-        ctx.lineTo(x2, y2);
+  for (const byColor of edgeGroups.values()) {
+    for (const group of byColor.values()) {
+      if (!group.segments.length) continue;
+      ctx.strokeStyle = group.color;
+      ctx.globalAlpha = Math.min(1, group.alpha);
+      ctx.lineWidth = group.lineWidth;
+      ctx.beginPath();
+      const seg = group.segments;
+      for (let i = 0; i < seg.length; i += 4) {
+        const x1 = seg[i], y1 = seg[i + 1], x2 = seg[i + 2], y2 = seg[i + 3];
+        ctx.moveTo(x1, y1);
+        if (isCurve) {
+          const dx = x2 - x1, dy = y2 - y1;
+          const len = Math.sqrt(dx * dx + dy * dy) || 1;
+          // Stable sign from endpoint coordinates so curves don't flip.
+          const sign = ((x1 * 131 + y2 * 17) | 0) & 1 ? 1 : -1;
+          const bow = Math.min(60, len * 0.22) * sign;
+          ctx.quadraticCurveTo((x1 + x2) * 0.5 + (-dy / len) * bow, (y1 + y2) * 0.5 + (dx / len) * bow, x2, y2);
+        } else {
+          ctx.lineTo(x2, y2);
+        }
       }
+      ctx.stroke();
     }
-    ctx.stroke();
   }
   ctx.globalAlpha = 1;
+};
+
+// Shapes for tagShapes: 0 circle, 1 square, 2 triangle, 3 diamond.
+function addShapePath(g, shape, x, y, r) {
+  if (shape === 1) { g.moveTo(x - r * 0.88, y - r * 0.88); g.rect(x - r * 0.88, y - r * 0.88, r * 1.76, r * 1.76); }
+  else if (shape === 2) { g.moveTo(x, y - r * 1.15); g.lineTo(x + r, y + r * 0.7); g.lineTo(x - r, y + r * 0.7); g.closePath(); }
+  else if (shape === 3) { g.moveTo(x, y - r * 1.2); g.lineTo(x + r * 1.2, y); g.lineTo(x, y + r * 1.2); g.lineTo(x - r * 1.2, y); g.closePath(); }
+  else { g.moveTo(x + r, y); g.arc(x, y, r, 0, Math.PI * 2); }
 }
 
-function drawNodes() {
-  const cap = sceneTuning.maxRenderedNodes || 0;
-  const cullActive = __cullFrame === tick;
+// Per-colour node lists and alpha buckets are reused across frames (the old
+// loop allocated an object per node per frame plus fresh Maps per colour).
+const nodeGroups = new Map();
+const BUCKETS = Array.from({ length: 9 }, () => []);
+let drawNodes = function () {
   const glowIntensity = clamp(cfg.glowIntensity ?? 1, 0, 1);
   const glowEnabled = sceneTuning.glowEnabled && glowIntensity > 0;
-  nodeGroups.clear();
+  const dof = sceneTuning.depthOfFieldEnabled;
+  const mt = motionTime();
+  const pulseSpeed = sceneTuning.motion.pulseSpeed;
+  for (const g of nodeGroups.values()) { g.low.length = 0; g.high.length = 0; }
   __drawnNodes = 0;
 
   for (let i = 0; i < nodes.length; i++) {
     const node = nodes[i];
-    if (cap && node.__renderable === false) continue;
-    if (cullActive && node.__vFrame !== tick) continue;
-    if (!finiteNumber(node.__fx) || !finiteNumber(node.__fy)) continue;
+    if (node.__vFrame !== tick || !node.__hasPoint) continue;
     __drawnNodes++;
-    const color = nodeColor(node);
-    const importance = node.importance || 0;
-    const pulse = Math.sin(tick * sceneTuning.motion.pulseSpeed + node.x * 0.004 + node.y * 0.003) * 0.5 + 0.5;
-    const ghostDim = node.ghost ? 0.35 : 1;
+    node.__pulse = Math.sin(mt * pulseSpeed + node.x * 0.004 + node.y * 0.003) * 0.5 + 0.5;
     let dofScale = 1, dofAlpha = 1;
-    if (sceneTuning.depthOfFieldEnabled) {
+    if (dof) {
       const distance = distFromCenterPoint(node.__fx, node.__fy);
       dofScale = 1 - distance * 0.3;
       dofAlpha = 1 - distance * 0.4;
     }
-    const flare = node.ghost ? 0 : getFlareIntensity(node.id);
-    const radius = node.r * dofScale;
-    const highPass = importance >= 0.3 || flare > 0;
+    node.__dofA = dofAlpha * (node.__depthAlpha || 1) * (node.__dim ? 0.22 : 1);
+    node.__flare = node.ghost ? 0 : getFlareIntensity(node.id);
+    node.__rad = node.r * dofScale * (node.__depthSize || 1);
+    const color = nodeColor(node);
     let group = nodeGroups.get(color);
-    if (!group) {
-      group = { low: [], high: [] };
-      nodeGroups.set(color, group);
-    }
-    const item = { node, px: node.__fx, py: node.__fy, importance, pulse, ghostDim, dofAlpha, flare, radius };
-    (highPass ? group.high : group.low).push(item);
+    if (!group) { group = { low: [], high: [] }; nodeGroups.set(color, group); }
+    ((node.importance || 0) >= 0.3 || node.__flare > 0 ? group.high : group.low).push(node);
   }
 
   if (glowEnabled) {
     const chromatic = !!cfg.chromaticBloom && !REDUCED_MOTION;
-    const BREATH_PERIOD_MS = 30000;
-    const breathPhase = (performance.now() / BREATH_PERIOD_MS) * Math.PI * 2;
+    const breathPhase = (performance.now() / 30000) * Math.PI * 2;
+    // On dark backgrounds glow is light: additive blending makes overlapping
+    // hubs brighter instead of muddier.
+    if (themeIsDark()) ctx.globalCompositeOperation = 'lighter';
     for (const [color, group] of nodeGroups) {
-      const all = group.low.length + group.high.length;
-      if (!all) continue;
+      if (!group.low.length && !group.high.length) continue;
       const sprite = getGlowSprite(color, chromatic, cfg.chromaticBloomIntensity);
-      const render = (list) => {
+      for (const list of [group.low, group.high]) {
         for (let i = 0; i < list.length; i++) {
-          const it = list[i];
-          if (it.node.ghost) continue;
-          const baseGlowRadius = it.radius + 3 + Math.sqrt(it.radius); // Base glow size
-          let glowRadius = baseGlowRadius * sceneTuning.glowScale * glowIntensity;
-          // Breathing is meant for long idle sessions, so it must not be gated on
-          // simulation activity (simAlpha drops to ~0 once the layout settles).
-          // Wall-clock based so the ~30s cycle stays constant when the frame
-          // loop steps down to 30/15fps on a calm scene.
+          const node = list[i];
+          if (node.ghost) continue;
+          let glowRadius = (node.__rad + 3 + Math.sqrt(node.__rad)) * sceneTuning.glowScale * glowIntensity;
+          // Breathing is wall-clock based so the ~30s cycle is the same at any fps.
           if (cfg.glowBreathing && !REDUCED_MOTION) {
-            const breath = Math.sin(breathPhase * cfg.glowBreathingSpeed + it.node.__breathOffset) * cfg.glowBreathingDepth;
-            glowRadius *= (1 + breath);
+            glowRadius *= 1 + Math.sin(breathPhase * cfg.glowBreathingSpeed + node.__breathOffset) * cfg.glowBreathingDepth;
           }
-          if (glowRadius <= 0) continue;
-          const glowAlpha = (0.08 + it.importance * 0.15 + it.pulse * 0.03 + it.flare * 0.4)
-            * it.dofAlpha * glowIntensity;
+          if (!(glowRadius > 0)) continue;
+          const glowAlpha = (0.08 + (node.importance || 0) * 0.15 + node.__pulse * 0.03 + node.__flare * 0.4) * node.__dofA * glowIntensity;
           if (glowAlpha <= 0) continue;
           ctx.globalAlpha = Math.min(1, glowAlpha);
-          const size = glowRadius * 2;
-          ctx.drawImage(sprite, it.px - glowRadius, it.py - glowRadius, size, size);
+          ctx.drawImage(sprite, node.__fx - glowRadius, node.__fy - glowRadius, glowRadius * 2, glowRadius * 2);
         }
-      };
-      render(group.low);
-      render(group.high);
+      }
     }
+    ctx.globalCompositeOperation = 'source-over';
     ctx.globalAlpha = 1;
   }
 
+  const shapes = !!cfg.tagShapes;
   const drawCoreList = (list, cr, cg, cb, baseColor) => {
-    const coreBatches = new Map();
-    const highlightBatches = new Map();
+    for (const b of BUCKETS) b.length = 0;
+    const hiBuckets = drawCoreList.hi;
+    for (const b of hiBuckets) b.length = 0;
     for (let i = 0; i < list.length; i++) {
-      const it = list[i];
-      const coreAlpha = Math.min(1,
-        (0.55 + it.importance * 0.35 + it.pulse * 0.1 + it.flare * 0.4) * it.dofAlpha * it.ghostDim
-      );
-      if (it.flare > 0) {
-        ctx.fillStyle = rgba(
-          Math.min(255, cr + Math.floor(it.flare * 200)),
-          Math.min(255, cg + Math.floor(it.flare * 200)),
-          Math.min(255, cb + Math.floor(it.flare * 200)),
-          coreAlpha
-        );
+      const node = list[i];
+      const ghostDim = node.ghost ? 0.35 : 1;
+      const coreAlpha = Math.min(1, (0.55 + (node.importance || 0) * 0.35 + node.__pulse * 0.1 + node.__flare * 0.4) * node.__dofA * ghostDim);
+      if (node.__flare > 0) {
+        const f = node.__flare;
+        ctx.fillStyle = rgba(Math.min(255, cr + Math.floor(f * 200)), Math.min(255, cg + Math.floor(f * 200)), Math.min(255, cb + Math.floor(f * 200)), coreAlpha);
         ctx.beginPath();
-        ctx.arc(it.px, it.py, it.radius, 0, Math.PI * 2);
+        addShapePath(ctx, shapes ? node.__shape : 0, node.__fx, node.__fy, node.__rad);
         ctx.fill();
-      } else {
-        const bucket = Math.max(1, Math.min(8, Math.round(coreAlpha * 8)));
-        let batch = coreBatches.get(bucket);
-        if (!batch) {
-          batch = [];
-          coreBatches.set(bucket, batch);
+        if (!node.ghost) {
+          ctx.fillStyle = rgba(Math.min(255, cr + 80 + Math.floor(f * 175)), Math.min(255, cg + 80 + Math.floor(f * 175)), Math.min(255, cb + 80 + Math.floor(f * 175)), Math.min(1, (0.7 + node.__pulse * 0.3) * node.__dofA));
+          ctx.beginPath();
+          ctx.arc(node.__fx, node.__fy, node.__rad * 0.4, 0, Math.PI * 2);
+          ctx.fill();
         }
-        batch.push(it);
+        continue;
       }
-
-      if (!it.node.ghost && it.importance > 0.3 && it.flare === 0) {
-        const hiAlpha = Math.min(1, (0.7 + it.pulse * 0.3) * it.dofAlpha);
-        const hiBucket = Math.max(1, Math.min(8, Math.round(hiAlpha * 8)));
-        let batch = highlightBatches.get(hiBucket);
-        if (!batch) {
-          batch = [];
-          highlightBatches.set(hiBucket, batch);
-        }
-        batch.push(it);
-      } else if (!it.node.ghost && it.flare > 0) {
-        ctx.fillStyle = rgba(
-          Math.min(255, cr + 80 + Math.floor(it.flare * 175)),
-          Math.min(255, cg + 80 + Math.floor(it.flare * 175)),
-          Math.min(255, cb + 80 + Math.floor(it.flare * 175)),
-          Math.min(1, (0.7 + it.pulse * 0.3) * it.dofAlpha)
-        );
-        ctx.beginPath();
-        ctx.arc(it.px, it.py, it.radius * 0.4, 0, Math.PI * 2);
-        ctx.fill();
+      BUCKETS[Math.max(1, Math.min(8, Math.round(coreAlpha * 8)))].push(node);
+      if (!node.ghost && (node.importance || 0) > 0.3) {
+        hiBuckets[Math.max(1, Math.min(8, Math.round(Math.min(1, (0.7 + node.__pulse * 0.3) * node.__dofA) * 8)))].push(node);
       }
     }
-
-    for (const [bucket, batch] of coreBatches) {
-      ctx.fillStyle = baseColor;
-      ctx.globalAlpha = bucket / 8;
+    ctx.fillStyle = baseColor;
+    for (let b = 1; b <= 8; b++) {
+      const batch = BUCKETS[b];
+      if (!batch.length) continue;
+      ctx.globalAlpha = b / 8;
       ctx.beginPath();
       for (let i = 0; i < batch.length; i++) {
-        const it = batch[i];
-        ctx.moveTo(it.px + it.radius, it.py);
-        ctx.arc(it.px, it.py, it.radius, 0, Math.PI * 2);
+        const node = batch[i];
+        addShapePath(ctx, shapes ? node.__shape : 0, node.__fx, node.__fy, node.__rad);
       }
       ctx.fill();
     }
-
-    const highlightColor = rgba(
-      Math.min(255, cr + 80),
-      Math.min(255, cg + 80),
-      Math.min(255, cb + 80),
-      1
-    );
-    for (const [bucket, batch] of highlightBatches) {
-      ctx.fillStyle = highlightColor;
-      ctx.globalAlpha = bucket / 8;
+    ctx.fillStyle = rgba(Math.min(255, cr + 80), Math.min(255, cg + 80), Math.min(255, cb + 80), 1);
+    for (let b = 1; b <= 8; b++) {
+      const batch = hiBuckets[b];
+      if (!batch.length) continue;
+      ctx.globalAlpha = b / 8;
       ctx.beginPath();
       for (let i = 0; i < batch.length; i++) {
-        const it = batch[i];
-        ctx.moveTo(it.px + it.radius * 0.4, it.py);
-        ctx.arc(it.px, it.py, it.radius * 0.4, 0, Math.PI * 2);
+        const node = batch[i];
+        ctx.moveTo(node.__fx + node.__rad * 0.4, node.__fy);
+        ctx.arc(node.__fx, node.__fy, node.__rad * 0.4, 0, Math.PI * 2);
       }
       ctx.fill();
     }
-
     ctx.globalAlpha = 1;
   };
+  drawCoreList.hi = drawNodes.__hi || (drawNodes.__hi = Array.from({ length: 9 }, () => []));
 
   for (const [color, group] of nodeGroups) {
+    if (!group.low.length) continue;
     const [cr, cg, cb] = hexToRGB(color);
     drawCoreList(group.low, cr, cg, cb, color);
   }
   for (const [color, group] of nodeGroups) {
+    if (!group.high.length) continue;
     const [cr, cg, cb] = hexToRGB(color);
     drawCoreList(group.high, cr, cg, cb, color);
   }
+};
+
+// Glow labels are pre-rendered sprites: shadowBlur per label per frame was
+// one of the more expensive calls in the frame.
+const labelSpriteCache = new Map();
+function labelSprite(text, font, fontSize, glowColor, chromatic) {
+  const key = text + '|' + font + '|' + glowColor + '|' + chromatic;
+  let s = labelSpriteCache.get(key);
+  if (s) return s;
+  if (labelSpriteCache.size > 200) labelSpriteCache.clear();
+  const pad = 10;
+  const m = document.createElement('canvas').getContext('2d');
+  m.font = font;
+  const w = Math.ceil(m.measureText(text).width) + pad * 2;
+  const h = Math.ceil(fontSize * 1.6) + pad * 2;
+  const c = document.createElement('canvas');
+  const scale = Math.min(2, DEVICE_DPR);
+  c.width = w * scale; c.height = h * scale;
+  const g = c.getContext('2d');
+  g.scale(scale, scale);
+  g.font = font;
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  g.shadowColor = glowColor;
+  g.shadowBlur = 6;
+  if (chromatic) {
+    g.fillStyle = 'rgba(255,100,200,0.7)'; g.fillText(text, w / 2 - 1, h / 2);
+    g.fillStyle = 'rgba(100,255,255,0.7)'; g.fillText(text, w / 2 + 1, h / 2);
+  }
+  g.fillStyle = 'rgba(255,255,255,0.92)';
+  g.fillText(text, w / 2, h / 2);
+  s = { c, w, h };
+  labelSpriteCache.set(key, s);
+  return s;
 }
 
-function drawLabels() {
+let drawLabels = function () {
   if (!cfg.hubLabels || sceneTuning.labelCount <= 0) return;
-  const cullActive = __cullFrame === tick;
-  const cap = sceneTuning.maxRenderedNodes || 0;
   const placed = [];
-
   let drawn = 0;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
+  const recentMode = cfg.labelSource === 'recent';
+  const [br, bg, bb] = hexToRGB(cfg.background);
+  const mode = (cfg.labelStyle && cfg.labelStyle.mode) || 'badge';
+  const textColor = luminance(cfg.background) > 0.4 ? 'rgba(30,30,35,0.85)' : 'rgba(245,247,255,0.88)';
+  const bgAlpha = cfg.labelStyle && finiteNumber(cfg.labelStyle.backgroundAlpha) ? cfg.labelStyle.backgroundAlpha : 0.72;
 
   for (let i = 0; i < labelCandidates.length; i++) {
     const node = labelCandidates[i];
     if (drawn >= sceneTuning.labelCount) break;
-    if ((node.importance || 0) < sceneTuning.labelMinImportance) continue;
-    if (!finiteNumber(node.__fx) || !finiteNumber(node.__fy)) continue;
-    if (cap && node.__renderable === false) continue;
-    if (cullActive && node.__vFrame !== tick) continue;
-    const distance = distFromCenterPoint(node.__fx, node.__fy);
-    const dofAlpha = sceneTuning.depthOfFieldEnabled ? 1 - distance * 0.4 : 1;
+    if (!recentMode && (node.importance || 0) < sceneTuning.labelMinImportance) continue;
+    if (node.__vFrame !== tick || !node.__hasPoint) continue;
+    const dofAlpha = sceneTuning.depthOfFieldEnabled ? 1 - distFromCenterPoint(node.__fx, node.__fy) * 0.4 : 1;
     if (dofAlpha <= 0.12) continue;
 
-    const label = node.__labelText;
+    let label = node.__labelText;
+    if (recentMode) label += '  ·  ' + SceneKit.ago(nodeDays(node));
     const fontSize = node.__labelFontSize;
-    ctx.font = `${fontSize}px ${labelFontStack()}`;
-    const textWidth = node.__labelWidth;
+    const font = `${fontSize}px ${labelFontStack()}`;
+    ctx.font = font;
+    const textWidth = recentMode ? ctx.measureText(label).width : node.__labelWidth || ctx.measureText(label).width;
     const x = node.__fx;
     const y = node.__fy + node.r + 16;
-    const box = {
-      x: x - textWidth / 2 - 8,
-      y: y - fontSize / 2 - 5,
-      w: textWidth + 16,
-      h: fontSize + 10
-    };
-
+    const box = { x: x - textWidth / 2 - 8, y: y - fontSize / 2 - 5, w: textWidth + 16, h: fontSize + 10 };
     if (box.x < 10 || box.x + box.w > innerWidth - 10 || box.y < 10 || box.y + box.h > innerHeight - 10) continue;
-    if (placed.some(other => !(box.x + box.w < other.x || other.x + other.w < box.x || box.y + box.h < other.y || other.y + other.h < box.y))) continue;
+    if (placed.some(o => !(box.x + box.w < o.x || o.x + o.w < box.x || box.y + box.h < o.y || o.y + o.h < box.y))) continue;
 
     const [cr, cg, cb] = hexToRGB(nodeColor(node));
-    const [br, bg, bb] = hexToRGB(cfg.background);
-    const mode = (cfg.labelStyle && cfg.labelStyle.mode) || 'badge';
-    const textColor = (br + bg + bb) / 3 > 128 ? 'rgba(30,30,35,0.85)' : 'rgba(245,247,255,0.88)';
-
     if (mode === 'badge') {
-      // Current behavior: dark rounded-rect badge
       roundedRectPath(box.x, box.y, box.w, box.h, 10);
-      ctx.fillStyle = rgba(
-        mixChannel(br, cr, 0.12),
-        mixChannel(bg, cg, 0.12),
-        mixChannel(bb, cb, 0.12),
-        0.72 * dofAlpha
-      );
+      ctx.fillStyle = rgba(mixChannel(br, cr, 0.12), mixChannel(bg, cg, 0.12), mixChannel(bb, cb, 0.12), bgAlpha * dofAlpha);
       ctx.fill();
       ctx.strokeStyle = rgba(cr, cg, cb, 0.25 * dofAlpha);
       ctx.lineWidth = 1;
@@ -1776,74 +2171,228 @@ function drawLabels() {
       ctx.fillStyle = textColor;
       ctx.fillText(label, x, y + 0.5);
     } else if (mode === 'glow') {
-      // Glowing text, no background
-      const glowColor = (cfg.labelStyle.glowColor === 'node') ? nodeColor(node) : cfg.accent;
-      ctx.shadowColor = glowColor;
-      ctx.shadowBlur = 6;
-      if (cfg.labelStyle && cfg.labelStyle.chromaticSplit) {
-        // Synthwave/Vapor: pink + cyan offset
-        ctx.fillStyle = 'rgba(255,100,200,0.7)';
-        ctx.fillText(label, x - 1, y + 0.5);
-        ctx.fillStyle = 'rgba(100,255,255,0.7)';
-        ctx.fillText(label, x + 1, y + 0.5);
-      }
-      ctx.fillStyle = 'rgba(255,255,255,0.92)';
-      ctx.fillText(label, x, y + 0.5);
-      ctx.shadowBlur = 0;
-      ctx.shadowColor = 'transparent';
+      const glowColor = cfg.labelStyle.glowColor === 'node' ? nodeColor(node)
+        : (cfg.labelStyle.glowColor && cfg.labelStyle.glowColor !== 'accent') ? cfg.labelStyle.glowColor : cfg.accent;
+      const s = labelSprite(label, font, fontSize, glowColor, !!cfg.labelStyle.chromaticSplit);
+      ctx.globalAlpha = dofAlpha;
+      ctx.drawImage(s.c, x - s.w / 2, y + 0.5 - s.h / 2, s.w, s.h);
+      ctx.globalAlpha = 1;
     } else if (mode === 'inherit') {
-      // Tinted background using node's tag color
       roundedRectPath(box.x, box.y, box.w, box.h, 10);
       ctx.fillStyle = rgba(cr, cg, cb, 0.22 * dofAlpha);
       ctx.fill();
-      ctx.fillStyle = 'rgba(255,255,255,0.88)';
+      ctx.fillStyle = textColor;
       ctx.fillText(label, x, y + 0.5);
     } else {
-      // Minimal: plain text, no background, no stroke
       ctx.fillStyle = textColor;
       ctx.fillText(label, x, y + 0.5);
     }
-
     placed.push(box);
     drawn += 1;
   }
+};
+
+// ---------------------------------------------------------------------------
+// Scene object for scene themes (see themes/_scenekit.js)
+// ---------------------------------------------------------------------------
+let sceneDirty = true;
+let sceneCache = null;
+let configStamp = 0;
+function rebuildScene() {
+  sceneDirty = false;
+  const list = [];
+  for (const n of nodes) if (n.__renderable !== false) list.push(n);
+  const index = new Map();
+  const recencyDays = cfg.recencyDays || 7;
+  const mode = cfg.nodeColorMode;
+  const sn = list.map((n, i) => {
+    index.set(n, i);
+    const h = Math.abs(hashStr(n.id));
+    const days = nodeDays(n);
+    let ci = -1;
+    if (!n.ghost) {
+      if (mode === 'folder') ci = n.folder ? (folderRank.get(n.folder) || 0) : folderRank.size;
+      else if (mode === 'age') ci = days < 2 ? 0 : days < 7 ? 1 : days < 30 ? 2 : days < 120 ? 3 : 4;
+      else ci = n.tag ? (tagRank.get(n.tag) || 0) : tagRank.size;
+    }
+    return {
+      i, id: n.id, src: n, x: 0, y: 0, bx: 0, by: 0, r: 0,
+      ci,
+      uc: (mode === 'tag' || mode === 'recency') && n.tag && cfg.tagColors[n.tag] ? cfg.tagColors[n.tag] : null,
+      dim: !!n.__dim,
+      ghost: !!n.ghost,
+      imp: n.importance || 0,
+      label: n.label || n.id,
+      ph: (h % 6283) / 1000,
+      h1: (h % 997) / 997,
+      h2: ((h >> 8) % 991) / 991,
+      days,
+      deg: n.deg || 0,
+      recent: !n.ghost && days < recencyDays,
+      ti: n.tag ? (tagRank.get(n.tag) || 0) : -1,
+      tag: n.tag || ''
+    };
+  });
+  const sl = [];
+  for (let i = 0; i < links.length; i++) {
+    const a = index.get(links[i].source), b = index.get(links[i].target);
+    if (a === undefined || b === undefined) continue;
+    sl.push({ a: sn[a], b: sn[b], tree: false, intra: !!sn[a].tag && sn[a].tag === sn[b].tag, i: sl.length });
+  }
+  // A spanning tree per tag (BFS from its best-connected note): Metro draws
+  // these as lines, Survey as footpaths.
+  const adj = sn.map(() => []);
+  sl.forEach((l, li) => { adj[l.a.i].push([l.b.i, li]); adj[l.b.i].push([l.a.i, li]); });
+  const seen = new Uint8Array(sn.length);
+  const byTag = new Map();
+  for (const n of sn) if (n.tag && !n.ghost) { if (!byTag.has(n.tag)) byTag.set(n.tag, []); byTag.get(n.tag).push(n); }
+  for (const group of byTag.values()) {
+    group.sort((a, b) => b.deg - a.deg);
+    for (const root of group) {
+      if (seen[root.i]) continue;
+      seen[root.i] = 1;
+      const q = [root.i];
+      for (let h = 0; h < q.length; h++) {
+        for (const [v, li] of adj[q[h]]) {
+          if (seen[v] || sn[v].tag !== root.tag) continue;
+          seen[v] = 1; sl[li].tree = true; q.push(v);
+        }
+      }
+    }
+  }
+  const real = sn.filter(n => !n.ghost);
+  const hubs = real.slice().sort((a, b) => b.deg - a.deg).slice(0, 7);
+  const recents = real.filter(n => n.recent).sort((a, b) => a.days - b.days).slice(0, 7);
+  const bfsCache = new Map();
+  const plainAdj = adj.map(a => a.map(x => x[0]));
+  sceneCache = {
+    nodes: sn, links: sl, hubs, recents, clusters: [],
+    stats: vaultStats(),
+    bfs(src) {
+      let d = bfsCache.get(src);
+      if (d) return d;
+      if (bfsCache.size > 64) bfsCache.clear();
+      d = new Int16Array(sn.length).fill(-1);
+      d[src] = 0;
+      const q = [src];
+      for (let h = 0; h < q.length; h++) {
+        const u = q[h];
+        if (d[u] >= 5) continue;
+        for (const v of plainAdj[u]) if (d[v] < 0) { d[v] = d[u] + 1; q.push(v); }
+      }
+      bfsCache.set(src, d);
+      return d;
+    }
+  };
+}
+
+let __clusterKey = '';
+function buildScene() {
+  if (sceneDirty || !sceneCache) rebuildScene();
+  const S = sceneCache;
+  const W = innerWidth, H = innerHeight;
+  const k = Math.max(0.5, W / 1280);
+  for (const n of S.nodes) {
+    const src = n.src;
+    n.x = src.__fx; n.y = src.__fy; n.bx = src.__bx; n.by = src.__by;
+    n.r = n.ghost ? 1.3 * k : (1.5 + Math.sqrt(n.deg) * 1.05) * 1.2 * k;
+  }
+  S.W = W; S.H = H; S.k = k;
+  S.key = `${graphEpoch}|${framingEpoch}|${W}x${H}|${configStamp}`;
+  if (S.key !== __clusterKey) {
+    __clusterKey = S.key;
+    const groups = new Map();
+    for (const n of S.nodes) {
+      if (n.ghost || n.ti < 0 || n.ti > 7 || !Number.isFinite(n.bx)) continue;
+      let g = groups.get(n.ti);
+      if (!g) { g = { ti: n.ti, name: n.tag, x: 0, y: 0, n: 0, list: [] }; groups.set(n.ti, g); }
+      g.x += n.bx; g.y += n.by; g.n++; g.list.push(n);
+    }
+    S.clusters = Array.from(groups.values()).filter(g => g.n >= 3).map(g => {
+      const x = g.x / g.n, y = g.y / g.n;
+      let r = 0;
+      for (const n of g.list) r += (n.bx - x) ** 2 + (n.by - y) ** 2;
+      return { ti: g.ti, name: g.name, x, y, rad: Math.sqrt(r / g.n), n: g.n };
+    }).sort((a, b) => a.ti - b.ti);
+  }
+  const sa = cfg.safeArea || {};
+  S.ins = { t: sa.top || 0, r: sa.right || 0, b: sa.bottom || 0, l: sa.left || 0 };
+  S.rect = framingRect;
+  S.o = { labels: cfg.hubLabels ? cfg.labelSource : 'off', colorBy: cfg.nodeColorMode, overlay: cfg.overlay };
+  S.pal = palette;
+  S.cfg = cfg;
+  return S;
 }
 
 if (PERF_ENABLED) {
   buildFramePoints = __perfWrap('buildFramePoints', buildFramePoints);
-  drawClusterHalos = __perfWrap('drawClusterHalos', drawClusterHalos);
   drawEdges = __perfWrap('drawEdges', drawEdges);
   drawNodes = __perfWrap('drawNodes', drawNodes);
 }
 
-function draw() {
-  // Theme dispatch: non-default themes handle their own full draw pipeline
-  if (cfg.theme && cfg.theme !== 'default' && window.THEMES && window.THEMES[cfg.theme] && window.THEMES[cfg.theme].draw) {
-    window.THEMES[cfg.theme].draw();
-    return;
-  }
+function drawGL() {
+  const dark = themeIsDark();
+  const glowIntensity = sceneTuning.glowEnabled ? clamp(cfg.glowIntensity ?? 1, 0, 1) : 0;
+  __drawnNodes = glRenderer.draw({
+    nodes, links,
+    linkStep: sceneTuning.linkStep,
+    visible: n => n.__vFrame === tick && n.__hasPoint,
+    colorOf: n => nodeColor(n),
+    edgeColorOf: l => edgeColor(l),
+    edgeAlpha: Math.min(1, cfg.linkOpacity * sceneTuning.linkOpacityScale * 0.9),
+    nodeAlpha: n => (n.ghost ? 0.35 : 0.85) * (n.__dim ? 0.22 : 1),
+    nodeSize: n => (n.r * 2 + 2) * (glowIntensity > 0 ? 2.2 : 1.2),
+    additive: dark,
+    glow: glowIntensity * 0.6
+  });
+}
 
+function draw() {
+  const theme = activeTheme();
+  tick += 1;
+  prepareDof();
   buildFramePoints();
-  maybeRebuildQuadtree();
-  markVisibleNodes();
-  // The context is opaque (alpha:false), so a bare clearRect paints solid black
-  // regardless of cfg.background. Presets with backgroundGradient off never fill
-  // the canvas otherwise, which made every flat/light theme (e.g. Mist) render
-  // on black instead of its configured background. Paint the base color here;
-  // the (opaque) gradient still overrides it for gradient presets.
-  ctx.fillStyle = cfg.background;
-  ctx.fillRect(0, 0, innerWidth, innerHeight);
-  // staticLayerDirty is set on sim start/stop by loadGraph and worker onmessage,
-  // not per-frame. The 500ms throttle in drawStaticLayer handles mid-sim rebuilds.
-  drawStaticLayer();
-  drawEdges();
-  drawParticles();
-  drawNodes();
-  drawLabels();
+
+  if (theme && theme.kind === 'scene') {
+    bgCanvas.style.display = 'none';
+    glCanvas.style.display = 'none';
+    const t0 = PERF_ENABLED ? performance.now() : 0;
+    const S = buildScene();
+    ctx.save();
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+    theme.draw(ctx, S, REDUCED_MOTION ? 6 : performance.now() / 1000);
+    if (!theme.labelsBuiltIn) SceneKit.labelPass(ctx, S, theme);
+    ctx.restore();
+    __drawnNodes = S.nodes.length;
+    if (PERF_ENABLED) __perfRecord('drawScene', performance.now() - t0);
+  } else {
+    const hooks = theme && theme.kind === 'hooks' ? theme : null;
+    const ownBackground = !!(hooks && hooks.drawBackground);
+    bgCanvas.style.display = ownBackground ? 'none' : 'block';
+    glCanvas.style.display = glActive ? 'block' : 'none';
+    ctx.clearRect(0, 0, innerWidth, innerHeight);
+    if (ownBackground) hooks.drawBackground();
+    else maybeRenderStaticLayer();
+    if (glActive && !hooks) {
+      drawGL();
+      drawParticles();
+      drawAmbientParticles();
+    } else {
+      if (hooks && hooks.drawEdges) hooks.drawEdges(); else drawEdges();
+      if (hooks && hooks.drawParticles) hooks.drawParticles();
+      else { drawAmbientParticles(); drawParticles(); }
+      if (hooks && hooks.drawNodes) hooks.drawNodes(); else drawNodes();
+    }
+    if (hooks && hooks.drawLabels) hooks.drawLabels(); else drawLabels();
+  }
   drawFadeOverlay();
   __hasRendered = true;
 }
 
+// ---------------------------------------------------------------------------
+// Live updates
+// ---------------------------------------------------------------------------
 function stopStateSync() {
   if (eventSource) {
     eventSource.close();
@@ -1860,7 +2409,7 @@ async function pollStateVersions() {
   if (!state) return;
   if (state.graphVersion && state.graphVersion > lastSeenGraphVersion) {
     lastSeenGraphVersion = state.graphVersion;
-    await loadGraph({ force: true });
+    await loadGraph();
   }
   if (state.configVersion && state.configVersion > lastSeenConfigVersion) {
     lastSeenConfigVersion = state.configVersion;
@@ -1870,7 +2419,7 @@ async function pollStateVersions() {
 
 function startStateSync() {
   stopStateSync();
-  if (SYNTHETIC_SIZE > 0) return;
+  if (SYNTHETIC_SIZE > 0 || ONESHOT) return;
   if ('EventSource' in window) {
     eventSource = new EventSource('/events');
     eventSource.addEventListener('hello', (e) => {
@@ -1885,13 +2434,14 @@ function startStateSync() {
         const data = JSON.parse(e.data);
         if (data.version) lastSeenGraphVersion = Math.max(lastSeenGraphVersion, data.version);
       } catch (err) {}
-      await loadGraph({ force: true });
+      await loadGraph();
     });
     eventSource.addEventListener('config', async (e) => {
       try {
         const data = JSON.parse(e.data);
         if (data.version) lastSeenConfigVersion = Math.max(lastSeenConfigVersion, data.version);
       } catch (err) {}
+      configStamp++;
       await loadCfg();
     });
     eventSource.onerror = () => {
@@ -1904,80 +2454,182 @@ function startStateSync() {
   stateSyncTimer = setInterval(pollStateVersions, Math.max(1000, cfg.refreshMs));
 }
 
+// ---------------------------------------------------------------------------
+// Frame loop
+// ---------------------------------------------------------------------------
+// The wallpaper runs all day, so idle cost matters more than peak fps.
+//   - active (layout settling, flares, fades, recent config change): up to
+//     maxFps (0 = "still": 30 fps only while something is changing)
+//   - calm: idleFps; 0 holds the last frame and stops the loop entirely
+//   - hidden: no frames; visibilitychange wakes it
 function isSceneCalm() {
-  if (simRunning) return false;
-  if (flares.size > 0) return false;
-  if (performance.now() - lastConfigChangeAt < 5000) return false;
-  const cap = sceneTuning.particleCap || MAX_PARTICLES;
-  if (cap > 0) {
-    const limit = (sceneTuning.particleCap || MAX_PARTICLES) * 0.2;
-    if (activeParticleCount > limit) return false;
-  }
+  if (simRunning || flares.size > 0 || __fadeActive || framingAnimating) return false;
+  if (performance.now() - lastConfigChangeAt < 3000) return false;
   return true;
 }
 
-function breathe() {
-  // When the desktop is asleep, the Space is switched away, or the wallpaper
-  // is otherwise not being shown, stop drawing entirely. Browsers already
-  // throttle rAF for hidden documents, but wallpaper hosts can keep a covered
-  // webview "visible"; this guarantees zero render work while hidden and
-  // resumes within 250ms of the wallpaper coming back. Big battery win on
-  // laptops that sleep the display.
-  if (typeof document !== 'undefined' && document.hidden && !ONESHOT && SYNTHETIC_SIZE === 0) {
-    markConfigChanged(); // treat the wake as activity so the scene isn't "calm"
-    setTimeout(breathe, 250);
-    return;
-  }
-  tick += 1;
-  if (tick % sceneTuning.motion.particleSpawnEvery === 0) spawnParticles();
-  updateParticles();
-  draw();
-  if (PERF_ENABLED) __perfFrame();
-  // 4a: drop to 30fps when the scene is calm; after a longer calm spell step down
-  // again to ~15fps so a static wallpaper costs almost nothing. Any change
-  // (sim restart, flare, config edit) resets isSceneCalm and escalates back to rAF.
-  if (isSceneCalm()) {
-    if (!__calmSince) __calmSince = performance.now();
-    const idleMs = performance.now() - __calmSince;
-    setTimeout(breathe, idleMs > 30000 ? 66 : 33);
-  } else {
-    __calmSince = 0;
-    requestAnimationFrame(breathe);
-  }
+let loopScheduled = false;
+let loopTimer = null;
+let lastFrameAt = 0;
+function wake() {
+  if (ONESHOT) return;
+  if (SYNTHETIC_SIZE > 0 && !__bootDone) return;
+  // A pending low-fps idle timer is pre-empted so changes show immediately.
+  if (loopTimer) { clearTimeout(loopTimer); loopTimer = null; loopScheduled = false; }
+  if (loopScheduled) return;
+  loopScheduled = true;
+  requestAnimationFrame(frameLoop);
 }
 
+function targetFps() {
+  const calm = isSceneCalm();
+  const max = cfg.maxFps | 0;
+  if (!calm) return max > 0 ? max : 30;
+  if (max === 0) return 0;
+  return Math.min(max, cfg.idleFps | 0);
+}
+
+let __lastDrawError = 0;
+function frameLoop(now) {
+  loopScheduled = false;
+  if (document.hidden && !EXPORT_MODE) return; // visibilitychange calls wake()
+  const fps = targetFps();
+  const dt = lastFrameAt ? Math.min(250, now - lastFrameAt) : 16.67;
+  // rAF runs at the display rate (often 120/144 Hz); skip frames that come
+  // earlier than the cap allows, at every cap including 60.
+  if (fps > 0 && lastFrameAt && now - lastFrameAt < 1000 / fps - 2) {
+    scheduleNext(fps, now);
+    return;
+  }
+  lastFrameAt = now;
+  const t0 = performance.now();
+  let failed = false;
+  try {
+    spawnParticles(now);
+    updateParticles(dt / 16.67);
+    updateAmbientParticles(dt / 16.67);
+    draw();
+  } catch (e) {
+    // A throwing theme must not freeze the wallpaper: log (rate-limited) and
+    // keep the loop alive at a low rate so a later config change can recover.
+    failed = true;
+    if (now - __lastDrawError > 10000) { __lastDrawError = now; console.warn('draw failed:', e && e.message ? e.message : e); }
+    try { ctx.restore(); } catch (_) {}
+    ctx.setTransform(renderScale, 0, 0, renderScale, 0, 0);
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+  }
+  if (PERF_ENABLED) { __perfRecord('frame', performance.now() - t0); __perfFrame(); }
+  const next = targetFps();
+  scheduleNext(failed ? Math.max(1, Math.min(next || 1, 2)) : next, now);
+}
+
+function scheduleNext(fps, now) {
+  if (fps <= 0) return; // hold: nothing changes until wake()
+  loopScheduled = true;
+  const delay = 1000 / fps - (performance.now() - now) - 4;
+  if (delay <= 8) { requestAnimationFrame(frameLoop); return; }
+  loopTimer = setTimeout(() => { loopTimer = null; requestAnimationFrame(frameLoop); }, delay);
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) { lastFrameAt = 0; markConfigChanged(); }
+});
+
+// Clock-driven changes: theme rotation and time-of-day tint/palette.
+let __lastDayKey = dayKey();
+setInterval(() => {
+  if (ONESHOT || SYNTHETIC_SIZE > 0) return;
+  reapplyEffectiveConfig(false);
+  // focusNote 'today' (and recency colours) depend on the date.
+  const today = dayKey();
+  if (today !== __lastDayKey) {
+    __lastDayKey = today;
+    refreshSceneTuning();
+    markConfigChanged();
+  }
+}, 30000);
+
+// ---------------------------------------------------------------------------
+// Export PNG (?export=1): composite every layer into one image
+// ---------------------------------------------------------------------------
+async function exportPng() {
+  const deadline = performance.now() + 12000;
+  while (simRunning && performance.now() < deadline) await new Promise(r => setTimeout(r, 200));
+  await ensureTheme(cfg.theme);
+  draw();
+  const w = canvas.width, h = canvas.height;
+  const out = document.createElement('canvas');
+  out.width = w; out.height = h;
+  const g = out.getContext('2d');
+  g.fillStyle = cfg.background;
+  g.fillRect(0, 0, w, h);
+  if (bgCanvas.style.display !== 'none') g.drawImage(bgCanvas, 0, 0, w, h);
+  if (glActive) g.drawImage(glCanvas, 0, 0, w, h);
+  g.drawImage(canvas, 0, 0);
+  const tint = cfg.timeOfDay === 'tint' ? timeOfDayTint(currentHour()) : null;
+  if (tint) { g.globalCompositeOperation = tint.op; g.globalAlpha = tint.alpha; g.fillStyle = tint.color; g.fillRect(0, 0, w, h); }
+  if (cfg.grain) { buildGrain(); g.globalCompositeOperation = 'overlay'; g.globalAlpha = themeIsDark() ? 0.07 : 0.1; g.drawImage(grainEl, 0, 0, w, h); }
+  g.globalCompositeOperation = 'source-over';
+  g.globalAlpha = 1;
+  if (cfg.vignette) {
+    const vg = g.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.35, w / 2, h / 2, Math.hypot(w, h) / 2);
+    vg.addColorStop(0, 'rgba(0,0,0,0)');
+    vg.addColorStop(1, themeIsDark() ? 'rgba(0,0,0,0.55)' : 'rgba(60,48,36,0.22)');
+    g.fillStyle = vg;
+    g.fillRect(0, 0, w, h);
+  }
+  const toast = document.getElementById('toast');
+  out.toBlob(blob => {
+    if (!blob) { toast.textContent = 'Export failed'; toast.style.display = 'block'; return; }
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'vault-wallpaper-' + dayKey() + '.png';
+    document.body.appendChild(a);
+    a.click();
+    toast.innerHTML = 'Saved ' + esc(a.download) + ' · <a href="' + url + '" download="' + esc(a.download) + '">download again</a>';
+    toast.style.display = 'block';
+    document.title = 'OLW exported';
+  }, 'image/png');
+}
+
+// ---------------------------------------------------------------------------
+// Boot
+// ---------------------------------------------------------------------------
+let __bootDone = false;
+resize();
 applyBackground();
 
 (async () => {
   await loadCfg();
-  await loadGraph({ force: true });
-  if (SYNTHETIC_SIZE > 0) {
-    if (ONESHOT) {
-      // Advance tick a handful of times so pulse/flare feel non-zero, then
-      // paint one final frame. Used by the screenshot script.
-      for (let i = 0; i < 4; i++) { tick += 1; draw(); }
-      // Expose a machine-readable render result in the title so the renderer
-      // smoke test can assert (via --dump-dom) that nodes actually painted.
-      try { document.title = `OLW drawn=${__drawnNodes} nodes=${nodes.length}`; } catch (e) {}
-      return;
-    }
-    breathe();
+  await loadGraph();
+  await ensureTheme(cfg.theme);
+  __bootDone = true;
+  if (ONESHOT) {
+    // Paint a few frames so pulse/flare are non-zero, then expose a
+    // machine-readable result in the title for the renderer smoke test.
+    for (let i = 0; i < 4; i++) draw();
+    try { document.title = `OLW drawn=${__drawnNodes} nodes=${nodes.length} theme=${cfg.theme}`; } catch (e) {}
     return;
   }
+  if (EXPORT_MODE) { startStateSync(); wake(); exportPng(); return; }
   startStateSync();
-  breathe();
+  wake();
 })();
 
-// Node search overlay
-(function() {
+// ---------------------------------------------------------------------------
+// Node search overlay (Ctrl/Cmd+K)
+// ---------------------------------------------------------------------------
+(function () {
   const wrap = document.getElementById('searchWrap');
   const input = document.getElementById('searchInput');
   const results = document.getElementById('searchResults');
   let focusIdx = -1;
-
-  function esc(s) {
-    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-  }
+  let matches = [];
+  const HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/;
+  // Defense in depth: colours are interpolated into a style="" attribute.
+  const safeColor = c => (HEX_COLOR_RE.test(c) ? c : '#7c5cff');
 
   function open() {
     wrap.classList.add('open');
@@ -1986,91 +2638,55 @@ applyBackground();
     results.innerHTML = '';
     focusIdx = -1;
   }
-
   function close() {
     wrap.classList.remove('open');
     results.innerHTML = '';
     focusIdx = -1;
   }
-
-  function getNodeColor(n) {
-    return n.__color || cfg.accent || '#7c5cff';
-  }
-
-  const HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/;
-  // Defense in depth: __color/accent are always server-validated hex today,
-  // but this is interpolated into a raw style="" attribute string rather than
-  // set via a DOM property, so anything unexpected reaching here (a future
-  // bug, not user input right now) can't break out of the attribute.
-  function safeColor(c) {
-    return HEX_COLOR_RE.test(c) ? c : '#7c5cff';
-  }
-
   function search(query) {
     if (!query || query.length < 2) { results.innerHTML = ''; focusIdx = -1; return; }
     const q = query.toLowerCase();
-    const match = [];
+    matches = [];
     for (const n of nodes) {
       if (n.ghost && !cfg.showUnresolvedLinks) continue;
-      const label = (n.label || n.id || '').toLowerCase();
-      if (label.includes(q)) match.push(n);
-      if (match.length >= 30) break;
+      if ((n.label || n.id || '').toLowerCase().includes(q)) matches.push(n);
+      if (matches.length >= 30) break;
     }
-    focusIdx = match.length ? 0 : -1;
-    results.innerHTML = match.map((n, i) =>
+    focusIdx = matches.length ? 0 : -1;
+    results.innerHTML = matches.map((n, i) =>
       '<div class="search-result' + (i === 0 ? ' focus' : '') + '" data-idx="' + i + '">' +
-      '<span class="tag-dot" style="background:' + safeColor(getNodeColor(n)) + '"></span>' +
+      '<span class="tag-dot" style="background:' + safeColor(nodeColor(n)) + '"></span>' +
       '<span class="label">' + esc(n.label || n.id) + '</span>' +
       (n.ghost ? '<span class="ghost-tag">unresolved</span>' : '') +
       '</div>'
     ).join('');
-    // Store matched nodes for click handler
-    results._matches = match;
   }
-
   function selectResult(idx) {
-    const matches = results._matches;
-    if (!matches || idx < 0 || idx >= matches.length) return;
-    const node = matches[idx];
-    flares.set(node.id, { start: tick + 1, duration: 120 });
+    if (idx < 0 || idx >= matches.length) return;
+    flares.set(matches[idx].id, { start: performance.now(), duration: 2000 });
     close();
+    wake();
   }
-
-  document.addEventListener('keydown', e => {
-    const ctrl = e.ctrlKey || e.metaKey;
-    if (ctrl && e.key === 'k') { e.preventDefault(); open(); return; }
-    if (e.key === 'Escape' && wrap.classList.contains('open')) { close(); return; }
-    if (wrap.classList.contains('open')) {
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        const max = results.querySelectorAll('.search-result').length;
-        if (max === 0) return;
-        focusIdx = (focusIdx + 1) % max;
-        updateFocus();
-      } else if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        const max = results.querySelectorAll('.search-result').length;
-        if (max === 0) return;
-        focusIdx = (focusIdx - 1 + max) % max;
-        updateFocus();
-      } else if (e.key === 'Enter' && focusIdx >= 0) {
-        e.preventDefault();
-        selectResult(focusIdx);
-      }
-    }
-  });
-
   function updateFocus() {
     const items = results.querySelectorAll('.search-result');
     items.forEach((el, i) => el.classList.toggle('focus', i === focusIdx));
     if (items[focusIdx]) items[focusIdx].scrollIntoView({ block: 'nearest' });
   }
-
+  document.addEventListener('keydown', e => {
+    if (PREVIEW_MODE) return;
+    const ctrl = e.ctrlKey || e.metaKey;
+    if (ctrl && e.key === 'k') { e.preventDefault(); open(); return; }
+    if (e.key === 'Escape' && wrap.classList.contains('open')) { close(); return; }
+    if (!wrap.classList.contains('open')) return;
+    const max = matches.length;
+    if (e.key === 'ArrowDown' && max) { e.preventDefault(); focusIdx = (focusIdx + 1) % max; updateFocus(); }
+    else if (e.key === 'ArrowUp' && max) { e.preventDefault(); focusIdx = (focusIdx - 1 + max) % max; updateFocus(); }
+    else if (e.key === 'Enter' && focusIdx >= 0) { e.preventDefault(); selectResult(focusIdx); }
+  });
   input.addEventListener('input', () => search(input.value));
   results.addEventListener('click', e => {
     const el = e.target.closest('.search-result');
-    if (!el) return;
-    selectResult(parseInt(el.dataset.idx));
+    if (el) selectResult(parseInt(el.dataset.idx, 10));
   });
 })();
 </script></body></html>

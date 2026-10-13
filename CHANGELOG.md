@@ -1,5 +1,44 @@
 # Changelog
 
+## [1.2.0] - 2026-10-13
+
+### Added
+- **Twelve new themes**: Aurora, Synapse, Mycelium, Phosphor, LED Board, Pocket Pixel, Territories, Survey, Metro, Risograph, Bauhaus and Cross-stitch. Each has a preset and a thumbnail.
+- **Theme plugin contract.** A `scene` theme draws a whole frame from a scene object (`themes/_scenekit.js` documents it). A `hooks` theme replaces individual stages of the default pipeline. The server discovers themes from `themes/*.js`, and `/api/themes` lists them with names and descriptions.
+- **Layouts:** `layout` can be `force`, `rings`, `timeline` or `galaxy`. The layout code is shared by the worker and the page (`layout-core.js`).
+- **Composition:** `framing` (`center`, `fill`, `left`, `right`, `none`), `zoom`, `offsetX`/`offsetY`, `safeArea`, and multi-monitor span via `?span=1of2`.
+- **Colour:** `palette`, `nodeColorMode: recency` with `recencyDays`, `timeOfDay` (`tint`/`palette`), `tagShapes`, plus a contrast floor that lifts accents too close to the background.
+- **Texture and overlays:** `grain`, `vignette`, and `overlay` (`clock`, `stats`, or `note` of the hour via `/api/note-of-hour`). These are CSS compositor layers, so they cost nothing per frame.
+- **Labels and focus:** `labelSource: recent`, `focusNote` (with `today`) and `focusHops`.
+- **`rotate`** cycles themes on a timer, with the existing crossfade.
+- **Performance controls:** `maxFps`, `idleFps`, and `renderer` (a WebGL2 path for large vaults, `gl-renderer.js`).
+- **Export PNG**: `/?export=1` composites every layer into one image.
+- **Custom presets on the server** (`/api/custom-presets`, stored in `custom-presets.json` next to the config). They used to live in per-origin localStorage, so they disappeared when the port changed.
+- **Settings page rebuilt:** every config key is editable, there is a live preview of the real wallpaper, an Export button, theme tiles, an inline confirm for reset, and an inline name field for saving presets (no `prompt()`).
+- **`--config` / `OLW_CONFIG`** for `npm start`, so it can share the CLI's config file.
+
+### Fixed
+- **No theme ever rendered.** `draw()` only called `THEMES[theme].draw`. Wash, Celestial and Sketch defined only stage hooks that nothing called, and Stained Glass registered as `stainedGlass` while the validator only accepted `stained-glass`. All four now render. Stained Glass was rewritten on `d3.Delaunay`; its old grid builder compared every cell with every node.
+- **Ambient particles never drew.** Nothing called them, `colorTint` didn't exist, and their alpha was multiplied by the simulation's alpha, which is zero once the layout settles.
+- **Depth parallax did nothing.** Layers were assigned before importance existed and never read. They now affect drift, size and alpha.
+- **Turning on glow breathing after startup erased every glow** (the breathing offset was NaN).
+- **Settings fought the presets.** The active preset was never highlighted, the label-font dropdown was overridden by `labelStyle.fontStyle`, Reset kept `labelStyle`, and presets silently wiped `tagColors`. Presets are now partial patches that leave tag colours alone.
+- **False ghost notes** from image and PDF embeds, case differences (`[[note]]` vs `Note.md`) and path links (`[[Folder/Note]]`).
+- **Only the first tag counted.** Every tag is now kept and counted, and the first is still the primary.
+- **`ignorePaths` changes needed a restart.** Changing it now rescans the vault and rebuilds the watcher.
+- The CLI wrote the config before validating it, and config errors always said `config.json:` whatever the file was called.
+- Presets Abyss and Mist were nearly invisible (accent too close to the background).
+- Preset and README screenshots came from a synthetic golden-angle spiral that no real vault produces. Synthetic captures now use a realistic generated vault settled by the real layout code.
+
+### Performance
+- **The wallpaper idles.** The old loop never stopped: with edge particles on (the default) it redrew at 60 fps forever. It now runs at `maxFps` while something changes and `idleFps` when settled, and with `idleFps: 0` the loop stops completely until there is a change. Motion is time-based, so lower frame rates don't slow it down.
+- **Editing a note no longer re-lays out the graph.** Body-only edits don't restart the simulation. Topology changes warm-start at alpha 0.25 instead of 1, and new notes start next to the notes they link to.
+- `/graph.json` has an ETag (an unchanged graph comes back as a 304) and gzip. The graph is no longer written to disk on every edit, only at startup and shutdown.
+- The worker drives ticks itself, transfers position buffers instead of cloning them, and runs tag clustering inside the tick with reused accumulators.
+- The background and cluster halos live on their own canvas and redraw only when they change. Node and edge drawing reuse buffers instead of allocating per node per frame, edge batches are cached when nothing moves, and glow labels are cached sprites instead of a `shadowBlur` per label per frame. Glow is additive on dark backgrounds.
+- The quadtree cull was replaced by a bounds check in the existing per-node loop; framing keeps the graph on screen.
+- The path sort uses a plain comparator instead of `localeCompare`.
+
 ## [1.1.1] - 2026-09-10
 
 ### Fixed

@@ -28,7 +28,6 @@
       "noteFlare": false,
       "autoScaleLargeVaults": true,
       "maxRenderedNodes": 6000,
-      "tagColors": {},
       "glowBreathing": false,
       "glowBreathingSpeed": 1.0,
       "glowBreathingDepth": 0.15,
@@ -46,9 +45,9 @@
         "mode": "badge",
         "backgroundAlpha": 0.72,
         "glowColor": "accent",
-        "chromaticSplit": false,
-        "fontStyle": "sans"
-      }
+        "chromaticSplit": false
+      },
+      "labelFont": "sans"
     }
   },
   {
@@ -80,7 +79,6 @@
       "noteFlare": true,
       "autoScaleLargeVaults": true,
       "maxRenderedNodes": 5000,
-      "tagColors": {},
       "glowBreathing": true,
       "glowBreathingSpeed": 1.0,
       "glowBreathingDepth": 0.15,
@@ -98,9 +96,9 @@
         "mode": "glow",
         "backgroundAlpha": 0,
         "glowColor": "accent",
-        "chromaticSplit": false,
-        "fontStyle": "sans"
-      }
+        "chromaticSplit": false
+      },
+      "labelFont": "sans"
     }
   },
   {
@@ -132,7 +130,6 @@
       "noteFlare": true,
       "autoScaleLargeVaults": true,
       "maxRenderedNodes": 5000,
-      "tagColors": {},
       "glowBreathing": true,
       "glowBreathingSpeed": 1.0,
       "glowBreathingDepth": 0.2,
@@ -150,9 +147,9 @@
         "mode": "glow",
         "backgroundAlpha": 0,
         "glowColor": "node",
-        "chromaticSplit": false,
-        "fontStyle": "sans"
-      }
+        "chromaticSplit": false
+      },
+      "labelFont": "sans"
     }
   },
   {
@@ -184,7 +181,6 @@
       "noteFlare": false,
       "autoScaleLargeVaults": true,
       "maxRenderedNodes": 6000,
-      "tagColors": {},
       "glowBreathing": false,
       "glowBreathingSpeed": 1.0,
       "glowBreathingDepth": 0.15,
@@ -202,9 +198,9 @@
         "mode": "badge",
         "backgroundAlpha": 0.65,
         "glowColor": "accent",
-        "chromaticSplit": false,
-        "fontStyle": "sans"
-      }
+        "chromaticSplit": false
+      },
+      "labelFont": "sans"
     }
   },
   {
@@ -237,7 +233,6 @@
       "noteFlare": false,
       "autoScaleLargeVaults": true,
       "maxRenderedNodes": 5000,
-      "tagColors": {},
       "glowBreathing": false,
       "glowBreathingSpeed": 1.0,
       "glowBreathingDepth": 0.15,
@@ -255,8 +250,7 @@
         "mode": "badge",
         "backgroundAlpha": 0.72,
         "glowColor": "accent",
-        "chromaticSplit": false,
-        "fontStyle": "mono"
+        "chromaticSplit": false
       }
     }
   },
@@ -290,7 +284,6 @@
       "noteFlare": false,
       "autoScaleLargeVaults": true,
       "maxRenderedNodes": 5000,
-      "tagColors": {},
       "glowBreathing": false,
       "glowBreathingSpeed": 1.0,
       "glowBreathingDepth": 0.15,
@@ -308,8 +301,7 @@
         "mode": "minimal",
         "backgroundAlpha": 0,
         "glowColor": "accent",
-        "chromaticSplit": false,
-        "fontStyle": "serif"
+        "chromaticSplit": false
       }
     }
   },
@@ -342,7 +334,6 @@
       "noteFlare": true,
       "autoScaleLargeVaults": true,
       "maxRenderedNodes": 5000,
-      "tagColors": {},
       "glowBreathing": true,
       "glowBreathingSpeed": 0.8,
       "glowBreathingDepth": 0.12,
@@ -360,9 +351,9 @@
         "mode": "glow",
         "backgroundAlpha": 0,
         "glowColor": "node",
-        "chromaticSplit": false,
-        "fontStyle": "sans"
-      }
+        "chromaticSplit": false
+      },
+      "labelFont": "sans"
     }
   },
   {
@@ -394,7 +385,6 @@
       "noteFlare": true,
       "autoScaleLargeVaults": true,
       "maxRenderedNodes": 5000,
-      "tagColors": {},
       "glowBreathing": true,
       "glowBreathingSpeed": 0.7,
       "glowBreathingDepth": 0.18,
@@ -412,9 +402,9 @@
         "mode": "glow",
         "backgroundAlpha": 0,
         "glowColor": "node",
-        "chromaticSplit": false,
-        "fontStyle": "sans"
-      }
+        "chromaticSplit": false
+      },
+      "labelFont": "sans"
     }
   },
   {
@@ -446,7 +436,6 @@
       "noteFlare": false,
       "autoScaleLargeVaults": true,
       "maxRenderedNodes": 5000,
-      "tagColors": {},
       "glowBreathing": false,
       "glowBreathingSpeed": 1.0,
       "glowBreathingDepth": 0.15,
@@ -464,9 +453,9 @@
         "mode": "badge",
         "backgroundAlpha": 0.6,
         "glowColor": "accent",
-        "chromaticSplit": false,
-        "fontStyle": "sans"
-      }
+        "chromaticSplit": false
+      },
+      "labelFont": "sans"
     }
   },
   {
@@ -498,7 +487,6 @@
       "noteFlare": false,
       "autoScaleLargeVaults": true,
       "maxRenderedNodes": 5000,
-      "tagColors": {},
       "glowBreathing": false,
       "glowBreathingSpeed": 1.0,
       "glowBreathingDepth": 0.15,
@@ -516,9 +504,9 @@
         "mode": "badge",
         "backgroundAlpha": 0.8,
         "glowColor": "accent",
-        "chromaticSplit": false,
-        "fontStyle": "sans"
-      }
+        "chromaticSplit": false
+      },
+      "labelFont": "sans"
     }
   },
   {
@@ -550,7 +538,6 @@
       "noteFlare": false,
       "autoScaleLargeVaults": true,
       "maxRenderedNodes": 5000,
-      "tagColors": {},
       "glowBreathing": true,
       "glowBreathingSpeed": 1.5,
       "glowBreathingDepth": 0.3,
@@ -568,21 +555,21 @@
         "mode": "glow",
         "backgroundAlpha": 0,
         "glowColor": "accent",
-        "chromaticSplit": true,
-        "fontStyle": "sans"
-      }
+        "chromaticSplit": true
+      },
+      "labelFont": "sans"
     }
   },
   {
     "name": "Mist",
     "description": "Silver-white on warm grey light-mode field. Ultra-faint edges, soft drift.",
-    "accent": "#c8ccd4",
+    "accent": "#5b6f8f",
     "background": "#d8d3c8",
     "thumbnail": "/docs/presets/mist.png",
     "config": {
-      "accent": "#c8ccd4",
+      "accent": "#5b6f8f",
       "background": "#d8d3c8",
-      "linkOpacity": 0.08,
+      "linkOpacity": 0.22,
       "nodeGlow": false,
       "glowIntensity": 0.4,
       "edgeColoring": false,
@@ -602,7 +589,6 @@
       "noteFlare": false,
       "autoScaleLargeVaults": true,
       "maxRenderedNodes": 5000,
-      "tagColors": {},
       "glowBreathing": true,
       "glowBreathingSpeed": 0.6,
       "glowBreathingDepth": 0.08,
@@ -620,9 +606,9 @@
         "mode": "minimal",
         "backgroundAlpha": 0,
         "glowColor": "accent",
-        "chromaticSplit": false,
-        "fontStyle": "sans"
-      }
+        "chromaticSplit": false
+      },
+      "labelFont": "sans"
     }
   },
   {
@@ -654,7 +640,6 @@
       "noteFlare": false,
       "autoScaleLargeVaults": true,
       "maxRenderedNodes": 5000,
-      "tagColors": {},
       "glowBreathing": true,
       "glowBreathingSpeed": 0.7,
       "glowBreathingDepth": 0.25,
@@ -672,9 +657,9 @@
         "mode": "glow",
         "backgroundAlpha": 0,
         "glowColor": "node",
-        "chromaticSplit": false,
-        "fontStyle": "sans"
-      }
+        "chromaticSplit": false
+      },
+      "labelFont": "sans"
     }
   },
   {
@@ -706,7 +691,6 @@
       "noteFlare": false,
       "autoScaleLargeVaults": true,
       "maxRenderedNodes": 5000,
-      "tagColors": {},
       "glowBreathing": true,
       "glowBreathingSpeed": 1.4,
       "glowBreathingDepth": 0.2,
@@ -724,19 +708,19 @@
         "mode": "glow",
         "backgroundAlpha": 0,
         "glowColor": "node",
-        "chromaticSplit": false,
-        "fontStyle": "sans"
-      }
+        "chromaticSplit": false
+      },
+      "labelFont": "sans"
     }
   },
   {
     "name": "Abyss",
     "description": "Deep-sea bioluminescence. Teal nodes on near-black, slow vertical drift.",
-    "accent": "#0a3d3d",
+    "accent": "#2fb8a8",
     "background": "#020608",
     "thumbnail": "/docs/presets/abyss.png",
     "config": {
-      "accent": "#0a3d3d",
+      "accent": "#2fb8a8",
       "background": "#020608",
       "linkOpacity": 0.25,
       "nodeGlow": true,
@@ -758,7 +742,6 @@
       "noteFlare": false,
       "autoScaleLargeVaults": true,
       "maxRenderedNodes": 5000,
-      "tagColors": {},
       "glowBreathing": true,
       "glowBreathingSpeed": 0.6,
       "glowBreathingDepth": 0.22,
@@ -776,9 +759,9 @@
         "mode": "glow",
         "backgroundAlpha": 0,
         "glowColor": "node",
-        "chromaticSplit": false,
-        "fontStyle": "sans"
-      }
+        "chromaticSplit": false
+      },
+      "labelFont": "sans"
     }
   },
   {
@@ -811,7 +794,6 @@
       "noteFlare": false,
       "autoScaleLargeVaults": true,
       "maxRenderedNodes": 5000,
-      "tagColors": {},
       "glowBreathing": false,
       "glowBreathingSpeed": 1.0,
       "glowBreathingDepth": 0.15,
@@ -829,8 +811,7 @@
         "mode": "minimal",
         "backgroundAlpha": 0,
         "glowColor": "accent",
-        "chromaticSplit": false,
-        "fontStyle": "serif"
+        "chromaticSplit": false
       }
     }
   },
@@ -864,7 +845,6 @@
       "noteFlare": false,
       "autoScaleLargeVaults": true,
       "maxRenderedNodes": 5000,
-      "tagColors": {},
       "glowBreathing": false,
       "glowBreathingSpeed": 1.0,
       "glowBreathingDepth": 0.15,
@@ -882,8 +862,7 @@
         "mode": "minimal",
         "backgroundAlpha": 0,
         "glowColor": "accent",
-        "chromaticSplit": false,
-        "fontStyle": "serif"
+        "chromaticSplit": false
       }
     }
   },
@@ -916,7 +895,6 @@
       "noteFlare": false,
       "autoScaleLargeVaults": true,
       "maxRenderedNodes": 5000,
-      "tagColors": {},
       "glowBreathing": true,
       "glowBreathingSpeed": 1.5,
       "glowBreathingDepth": 0.28,
@@ -934,9 +912,234 @@
         "mode": "glow",
         "backgroundAlpha": 0,
         "glowColor": "node",
-        "chromaticSplit": true,
-        "fontStyle": "sans"
-      }
+        "chromaticSplit": true
+      },
+      "labelFont": "sans"
+    }
+  },
+  {
+    "name": "Aurora",
+    "description": "Curtains of coloured light over each tag cluster.",
+    "accent": "#5ef2c8",
+    "background": "#03050b",
+    "thumbnail": "/docs/presets/aurora.png",
+    "config": {
+      "theme": "aurora",
+      "hubLabels": true,
+      "hubLabelCount": 5,
+      "labelSource": "hubs",
+      "grain": true,
+      "vignette": true
+    }
+  },
+  {
+    "name": "Synapse",
+    "description": "Recent edits fire pulses that travel through your links.",
+    "accent": "#7df9ff",
+    "background": "#05040b",
+    "thumbnail": "/docs/presets/synapse.png",
+    "config": {
+      "theme": "synapse",
+      "hubLabels": true,
+      "hubLabelCount": 5,
+      "labelSource": "hubs",
+      "vignette": true
+    }
+  },
+  {
+    "name": "Mycelium",
+    "description": "Wandering hyphae and spore clusters; amber pulses from fresh notes.",
+    "accent": "#e9dcc0",
+    "background": "#0d0b09",
+    "thumbnail": "/docs/presets/mycelium.png",
+    "config": {
+      "theme": "mycelium",
+      "hubLabels": true,
+      "hubLabelCount": 5,
+      "labelSource": "hubs",
+      "vignette": true
+    }
+  },
+  {
+    "name": "Phosphor",
+    "description": "Green CRT terminal with glyph nodes and scanlines.",
+    "accent": "#5dff8f",
+    "background": "#020b05",
+    "thumbnail": "/docs/presets/phosphor.png",
+    "config": {
+      "theme": "phosphor",
+      "hubLabels": true,
+      "hubLabelCount": 5,
+      "labelSource": "hubs",
+      "grain": false
+    }
+  },
+  {
+    "name": "LED Board",
+    "description": "Resampled onto a grid of LEDs with a scrolling stats ticker.",
+    "accent": "#ffb347",
+    "background": "#0c0805",
+    "thumbnail": "/docs/presets/led.png",
+    "config": {
+      "theme": "led",
+      "hubLabels": true,
+      "hubLabelCount": 5,
+      "labelSource": "hubs",
+      "grain": false
+    }
+  },
+  {
+    "name": "Pocket Pixel",
+    "description": "Four-shade handheld palette with Bayer dithering.",
+    "accent": "#9bbc0f",
+    "background": "#0f380f",
+    "thumbnail": "/docs/presets/pixel.png",
+    "config": {
+      "theme": "pixel",
+      "hubLabels": true,
+      "hubLabelCount": 5,
+      "labelSource": "hubs",
+      "grain": false
+    }
+  },
+  {
+    "name": "Territories",
+    "description": "An atlas: tags become countries, hubs become capitals.",
+    "accent": "#3a342e",
+    "background": "#d3e2ea",
+    "thumbnail": "/docs/presets/territories.png",
+    "config": {
+      "theme": "territories",
+      "hubLabels": true,
+      "hubLabelCount": 5,
+      "labelSource": "hubs",
+      "framing": "fill"
+    }
+  },
+  {
+    "name": "Survey",
+    "description": "Topographic sheet: link density becomes contour lines.",
+    "accent": "#8a5326",
+    "background": "#f2f1ea",
+    "thumbnail": "/docs/presets/survey.png",
+    "config": {
+      "theme": "survey",
+      "hubLabels": true,
+      "hubLabelCount": 5,
+      "labelSource": "hubs",
+      "framing": "fill"
+    }
+  },
+  {
+    "name": "Metro",
+    "description": "Transit diagram with octilinear lines per tag.",
+    "accent": "#e3242b",
+    "background": "#f4f5f2",
+    "thumbnail": "/docs/presets/metro.png",
+    "config": {
+      "theme": "metro",
+      "hubLabels": true,
+      "hubLabelCount": 5,
+      "labelSource": "hubs",
+      "framing": "fill"
+    }
+  },
+  {
+    "name": "Risograph",
+    "description": "Misregistered riso inks with halftoned hubs.",
+    "accent": "#ff48b0",
+    "background": "#f3efe7",
+    "thumbnail": "/docs/presets/riso.png",
+    "config": {
+      "theme": "riso",
+      "hubLabels": true,
+      "hubLabelCount": 5,
+      "labelSource": "hubs"
+    }
+  },
+  {
+    "name": "Bauhaus",
+    "description": "Primary-colour poster; tags become shapes.",
+    "accent": "#d4372c",
+    "background": "#ece8df",
+    "thumbnail": "/docs/presets/bauhaus.png",
+    "config": {
+      "theme": "bauhaus",
+      "hubLabels": true,
+      "hubLabelCount": 5,
+      "labelSource": "hubs"
+    }
+  },
+  {
+    "name": "Cross-stitch",
+    "description": "X stitches on Aida cloth, backstitched links.",
+    "accent": "#c8414b",
+    "background": "#eee8db",
+    "thumbnail": "/docs/presets/stitch.png",
+    "config": {
+      "theme": "stitch",
+      "hubLabels": true,
+      "hubLabelCount": 5,
+      "labelSource": "hubs"
+    }
+  },
+  {
+    "name": "Stained Glass",
+    "description": "Voronoi panes of coloured glass set in lead.",
+    "accent": "#2471a3",
+    "background": "#0b0a10",
+    "thumbnail": "/docs/presets/stained-glass.png",
+    "config": {
+      "theme": "stained-glass",
+      "hubLabels": true,
+      "hubLabelCount": 5,
+      "labelSource": "hubs",
+      "vignette": true
+    }
+  },
+  {
+    "name": "Celestial",
+    "description": "Star chart with diffraction spikes and orbital rings.",
+    "accent": "#ffffff",
+    "background": "#020408",
+    "thumbnail": "/docs/presets/celestial.png",
+    "config": {
+      "theme": "celestial",
+      "hubLabels": true,
+      "hubLabelCount": 5,
+      "labelSource": "hubs"
+    }
+  },
+  {
+    "name": "Ink Wash",
+    "description": "Watercolour bleeds on paper.",
+    "accent": "#3a4a6b",
+    "background": "#f0efe8",
+    "thumbnail": "/docs/presets/wash.png",
+    "config": {
+      "theme": "wash",
+      "hubLabels": true,
+      "hubLabelCount": 5,
+      "labelSource": "hubs",
+      "accent": "#3a4a6b",
+      "background": "#f0efe8",
+      "nodeGlow": false
+    }
+  },
+  {
+    "name": "Sketchbook",
+    "description": "Pencil on ruled paper.",
+    "accent": "#4a4a5a",
+    "background": "#f5f0e8",
+    "thumbnail": "/docs/presets/sketch.png",
+    "config": {
+      "theme": "sketch",
+      "hubLabels": true,
+      "hubLabelCount": 5,
+      "labelSource": "hubs",
+      "accent": "#4a4a5a",
+      "background": "#f5f0e8",
+      "nodeGlow": false
     }
   }
 ]

@@ -1,9 +1,18 @@
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
+const zlib = require('zlib');
 const chokidar = require('chokidar');
 
-const cfgPath = path.join(__dirname, 'config.json');
+// Config path: --config <file> or OLW_CONFIG win over the package-local
+// config.json, so `npm start` and the npx CLI can point at the same file.
+function configPathFromArgs(argv = process.argv.slice(2), env = process.env) {
+  const i = argv.indexOf('--config');
+  if (i >= 0 && argv[i + 1] && !argv[i + 1].startsWith('-')) return path.resolve(argv[i + 1]);
+  if (env.OLW_CONFIG) return path.resolve(env.OLW_CONFIG);
+  return path.join(__dirname, 'config.json');
+}
+const cfgPath = configPathFromArgs();
 const OUT = path.join(__dirname, 'graph.json');
 // DEFAULTS is canonical — clients fetch defaults via /api/defaults.
 const DEFAULTS = {
@@ -51,7 +60,33 @@ const DEFAULTS = {
   depthParallax: true,
   depthParallaxStrength: 0.5,
   depthParallaxLayers: 3,
-  theme: 'default'
+  theme: 'default',
+  labelStyle: {},
+  // Composition
+  layout: 'force',
+  framing: 'center',
+  zoom: 1,
+  offsetX: 0,
+  offsetY: 0,
+  safeArea: { top: 0, right: 0, bottom: 0, left: 0 },
+  // Colour
+  palette: 'auto',
+  recencyDays: 7,
+  timeOfDay: 'off',
+  tagShapes: false,
+  // Texture
+  grain: true,
+  vignette: false,
+  // Overlays and focus
+  overlay: 'none',
+  labelSource: 'hubs',
+  focusNote: '',
+  focusHops: 2,
+  rotate: { themes: [], everyMinutes: 60 },
+  // Performance
+  maxFps: 30,
+  idleFps: 10,
+  renderer: 'auto'
 };
 const PUBLIC_FILES = new Map([
   ['/', path.join(__dirname, 'index.html')],
@@ -60,21 +95,62 @@ const PUBLIC_FILES = new Map([
   ['/vendor/d3.min.js', path.join(__dirname, 'vendor', 'd3.min.js')],
   ['/worker.js', path.join(__dirname, 'worker.js')],
   ['/renderer-core.js', path.join(__dirname, 'renderer-core.js')],
+  ['/layout-core.js', path.join(__dirname, 'layout-core.js')],
+  ['/gl-renderer.js', path.join(__dirname, 'gl-renderer.js')],
   ['/presets.json', path.join(__dirname, 'presets.json')]
 ]);
+const APP_ASSETS = new Set(['/worker.js', '/renderer-core.js', '/layout-core.js', '/gl-renderer.js']);
 const DOCS_DIR = path.join(__dirname, 'docs');
 const DOCS_ALLOWED_EXTS = new Set(['.png', '.gif', '.jpg', '.svg', '.md', '.txt']);
 const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
 const MOTION_MODES = new Set(['still', 'light', 'balanced', 'showcase']);
 const EDGE_STYLES = new Set(['line', 'curve', 'none']);
-const NODE_COLOR_MODES = new Set(['tag', 'age', 'folder']);
+const NODE_COLOR_MODES = new Set(['tag', 'age', 'folder', 'recency']);
 const LABEL_FONTS = new Set(['sans', 'mono', 'serif']);
-const THEME_NAMES = new Set(['default', 'celestial', 'wash', 'sketch', 'stained-glass']);
 const LABEL_STYLE_MODES = new Set(['badge', 'glow', 'minimal', 'inherit']);
-const WIKILINK = /\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]/g;
+const LAYOUTS = new Set(['force', 'rings', 'timeline', 'galaxy']);
+const FRAMINGS = new Set(['center', 'fill', 'left', 'right', 'none']);
+const PALETTES = new Set(['auto', 'aurora', 'riso', 'metro', 'pastel', 'earth', 'neon', 'viridis', 'mono']);
+const TIME_OF_DAY = new Set(['off', 'tint', 'palette']);
+const OVERLAYS = new Set(['none', 'clock', 'stats', 'note']);
+const LABEL_SOURCES = new Set(['hubs', 'recent']);
+const RENDERERS = new Set(['auto', 'canvas', 'webgl']);
+
+// Themes are discovered from themes/*.js so the validator can never drift from
+// what the renderer can load. Files starting with "_" are shared helpers, and
+// registry.js is the loader stub. Each theme file registers THEMES[<basename>]
+// and may declare `// @name` and `// @description` header lines for the UI.
+const THEMES_DIR = path.join(__dirname, 'themes');
+function discoverThemes(dir = THEMES_DIR) {
+  const list = [{ id: 'default', name: 'Default', description: 'The classic glowing graph. Presets tune it.', dark: true }];
+  let files;
+  try { files = fs.readdirSync(dir); } catch (_) { return list; }
+  for (const f of files.sort()) {
+    if (!f.endsWith('.js') || f.startsWith('_') || f === 'registry.js') continue;
+    const id = f.slice(0, -3);
+    let head = '';
+    try { head = fs.readFileSync(path.join(dir, f), 'utf8').slice(0, 2000); } catch (_) {}
+    const name = (head.match(/@name\s+(.+)/) || [])[1];
+    const description = (head.match(/@description\s+(.+)/) || [])[1];
+    const dark = !/@light\b/.test(head);
+    list.push({ id, name: name ? name.trim() : id, description: description ? description.trim() : '', dark });
+  }
+  return list;
+}
+const THEME_LIST = discoverThemes();
+const THEME_NAMES = new Set(THEME_LIST.map(t => t.id));
+// [[target]] / [[target|alias]] / [[target#heading]]. A leading "!" marks an
+// embed; embeds of non-markdown files (images, PDFs, audio) are attachments,
+// not note links, and must not become ghost nodes.
+// Character classes exclude "[" so an unclosed "[[" can't make the scan
+// quadratic (CodeQL js/polynomial-redos).
+const WIKILINK = /(!?)\[\[([^[\]|#]+)(?:[|#][^[\]]*)?\]\]/g;
+const NON_NOTE_EXT = /\.(png|jpe?g|gif|webp|svg|bmp|avif|heic|pdf|mp3|mp4|m4a|wav|ogg|webm|mov|canvas|excalidraw|base|csv|zip)$/i;
 const FRONTMATTER = /^---\r?\n([\s\S]*?)\r?\n---/;
 const TAGS_FLOW = /^tags:\s*\[([^\]]*)\]/m;
-const TAGS_BLOCK = /^tags:\s*\r?\n((?:\s*-\s+.+\r?\n?)+)/m;
+// [ \t] rather than \s so the pattern can't backtrack across newlines
+// (CodeQL js/polynomial-redos on files with many "\n " repetitions).
+const TAGS_BLOCK = /^tags:[ \t]*\r?\n((?:[ \t]*-[ \t]+\S[^\r\n]*(?:\r?\n|$))+)/m;
 const TAGS_INLINE = /(?:^|\s)#([a-zA-Z][\w-/]*)/g;
 // vendor/d3.min.js is pinned by npm version and never changes without a
 // reinstall, so it's safe to cache long. worker.js/renderer-core.js are our
@@ -97,8 +173,8 @@ function noteId(basename, filePath, vaultPath, duplicatedBasenames) {
   return rel.includes('/') ? rel : './' + rel;
 }
 
-function failConfig(message) {
-  console.error(`config.json: ${message}`);
+function failConfig(message, configPath = cfgPath) {
+  console.error(`${configPath}: ${message}`);
   process.exit(1);
 }
 
@@ -176,7 +252,7 @@ function validateIgnorePaths(value, key) {
 }
 
 function validateLabelStyle(value) {
-  if (value === undefined) return undefined;
+  if (value === undefined) return {};
   if (!isPlainObject(value)) throw new Error('labelStyle must be an object');
   const s = {};
   if (value.mode !== undefined) {
@@ -193,6 +269,38 @@ function validateLabelStyle(value) {
   if (value.chromaticSplit !== undefined) s.chromaticSplit = validateBoolean(value.chromaticSplit, 'labelStyle.chromaticSplit');
   if (value.fontStyle !== undefined) s.fontStyle = validateEnum(value.fontStyle, 'labelStyle.fontStyle', LABEL_FONTS);
   return s;
+}
+
+function validateSafeArea(value, key) {
+  if (!isPlainObject(value)) throw new Error(`${key} must be an object with top, right, bottom, left`);
+  const out = {};
+  for (const side of ['top', 'right', 'bottom', 'left']) {
+    const v = value[side] === undefined ? 0 : value[side];
+    out[side] = validateInteger(v, `${key}.${side}`, 0, 1000);
+  }
+  for (const k of Object.keys(value)) {
+    if (!['top', 'right', 'bottom', 'left'].includes(k)) throw new Error(`${key}.${k} is not a known side`);
+  }
+  return out;
+}
+
+function validateString(value, key, maxLength) {
+  if (typeof value !== 'string' || value.length > maxLength) {
+    throw new Error(`${key} must be a string of at most ${maxLength} characters`);
+  }
+  return value.trim();
+}
+
+function validateRotate(value, key) {
+  if (!isPlainObject(value)) throw new Error(`${key} must be an object like { "themes": [], "everyMinutes": 60 }`);
+  const themes = value.themes === undefined ? [] : value.themes;
+  if (!Array.isArray(themes) || themes.length > 32) throw new Error(`${key}.themes must be an array of up to 32 theme ids`);
+  const out = { themes: themes.map((t, i) => validateEnum(t, `${key}.themes[${i}]`, THEME_NAMES)), everyMinutes: 60 };
+  if (value.everyMinutes !== undefined) out.everyMinutes = validateInteger(value.everyMinutes, `${key}.everyMinutes`, 1, 1440);
+  for (const k of Object.keys(value)) {
+    if (k !== 'themes' && k !== 'everyMinutes') throw new Error(`${key}.${k} is not a known field`);
+  }
+  return out;
 }
 
 function isIgnoredPath(filePath, vaultPath, patterns) {
@@ -254,7 +362,27 @@ const VALIDATORS = {
   depthParallaxStrength:  { fn: validateNumber,   args: [0, 1] },
   depthParallaxLayers:    { fn: validateInteger,  args: [2, 4] },
   theme:                  { fn: validateEnum,     args: [THEME_NAMES] },
-  labelStyle:             { fn: validateLabelStyle }
+  labelStyle:             { fn: validateLabelStyle },
+  layout:                 { fn: validateEnum,     args: [LAYOUTS] },
+  framing:                { fn: validateEnum,     args: [FRAMINGS] },
+  zoom:                   { fn: validateNumber,   args: [0.4, 3] },
+  offsetX:                { fn: validateNumber,   args: [-1, 1] },
+  offsetY:                { fn: validateNumber,   args: [-1, 1] },
+  safeArea:               { fn: validateSafeArea },
+  palette:                { fn: validateEnum,     args: [PALETTES] },
+  recencyDays:            { fn: validateInteger,  args: [1, 365] },
+  timeOfDay:              { fn: validateEnum,     args: [TIME_OF_DAY] },
+  tagShapes:              { fn: validateBoolean },
+  grain:                  { fn: validateBoolean },
+  vignette:               { fn: validateBoolean },
+  overlay:                { fn: validateEnum,     args: [OVERLAYS] },
+  labelSource:            { fn: validateEnum,     args: [LABEL_SOURCES] },
+  focusNote:              { fn: validateString,   args: [300] },
+  focusHops:              { fn: validateInteger,  args: [1, 4] },
+  rotate:                 { fn: validateRotate },
+  maxFps:                 { fn: validateInteger,  args: [0, 60] },
+  idleFps:                { fn: validateInteger,  args: [0, 30] },
+  renderer:               { fn: validateEnum,     args: [RENDERERS] }
 };
 
 function sanitizePersistedConfig(raw) {
@@ -297,7 +425,7 @@ function readConfigFile(configPath = cfgPath) {
     const raw = JSON.parse(fs.readFileSync(configPath, 'utf8'));
     return sanitizePersistedConfig(raw);
   } catch (e) {
-    failConfig(e.message);
+    failConfig(e.message, configPath);
   }
 }
 
@@ -307,27 +435,37 @@ function writeConfigFile(nextCfg, configPath = cfgPath) {
   fs.renameSync(tmp, configPath);
 }
 
-function extractTag(content) {
+// All tags on a note, in order: frontmatter first, then inline #tags. The
+// first one is the note's primary tag (used for clustering and colour); the
+// rest are kept so every tag is counted and can be coloured in settings.
+function extractTags(content) {
+  const out = [];
+  const add = t => {
+    const v = String(t).trim().replace(/['"#]/g, '');
+    if (v && !out.includes(v)) out.push(v);
+  };
   const fm = content.match(FRONTMATTER);
   if (fm) {
     const flow = fm[1].match(TAGS_FLOW);
-    if (flow) {
-      const first = flow[1].split(',')[0].trim().replace(/['"#]/g, '');
-      if (first) return first;
-    }
+    if (flow) flow[1].split(',').forEach(add);
     const block = fm[1].match(TAGS_BLOCK);
     if (block) {
-      const firstLine = block[1].match(/^\s*-\s+(.+)/);
-      if (firstLine) {
-        const first = firstLine[1].trim().replace(/['"#]/g, '');
-        if (first) return first;
+      for (const line of block[1].split(/\r?\n/)) {
+        const m = line.match(/^\s*-\s+(.+)/);
+        if (m) add(m[1]);
       }
     }
   }
+  const body = fm ? content.slice(fm[0].length) : content;
   TAGS_INLINE.lastIndex = 0;
-  const inline = TAGS_INLINE.exec(content);
-  if (inline) return inline[1];
-  return null;
+  let m;
+  while ((m = TAGS_INLINE.exec(body)) !== null) add(m[1]);
+  return out;
+}
+
+function extractTag(content) {
+  const tags = extractTags(content);
+  return tags.length ? tags[0] : null;
 }
 
 function extractWikilinks(content) {
@@ -335,10 +473,29 @@ function extractWikilinks(content) {
   WIKILINK.lastIndex = 0;
   let match;
   while ((match = WIKILINK.exec(content)) !== null) {
-    const target = match[1].trim();
-    if (target) result.push(target);
+    let target = match[2].trim();
+    if (!target) continue;
+    if (NON_NOTE_EXT.test(target)) continue; // attachment link or embed, not a note
+    if (match[1] === '!' && /\.[a-z0-9]{1,6}$/i.test(target) && !/\.md$/i.test(target)) continue;
+    target = target.replace(/\.md$/i, '');
+    result.push(target);
   }
   return result;
+}
+
+// Plain-text excerpt for the "note of the hour" overlay: no frontmatter,
+// headings markers, links collapsed to their text, whitespace squashed.
+function noteExcerpt(content, maxLength = 220) {
+  let text = content.replace(FRONTMATTER, '');
+  text = text
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/!\[\[[^\]]*\]\]/g, ' ')
+    .replace(/\[\[([^\]|#]+)(?:[|#]([^\]]*))?\]\]/g, (_, a, b) => b || a)
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/[#>*_`~|-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return text.length > maxLength ? text.slice(0, maxLength - 1).replace(/\s+\S*$/, '') + '…' : text;
 }
 
 function isMarkdownPath(filePath) {
@@ -369,7 +526,8 @@ async function parseMarkdownEntry(filePath) {
       path: filePath,
       basename,
       mtimeMs: stat.mtimeMs,
-      tag: extractTag(content),
+      tags: extractTags(content),
+      get tag() { return this.tags.length ? this.tags[0] : null; },
       wikilinks: extractWikilinks(content)
     };
   } catch (e) {
@@ -451,7 +609,7 @@ function materializeGraph(entries, vaultPath, options = {}) {
     ? options.showUnresolvedLinks
     : DEFAULTS.showUnresolvedLinks;
   const raw = Array.from(entries.values())
-    .sort((a, b) => a.path.localeCompare(b.path))
+    .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
     .map(entry => ({ basename: entry.basename, filePath: entry.path, entry }));
   const basenameCounts = {};
   for (const item of raw) {
@@ -465,7 +623,11 @@ function materializeGraph(entries, vaultPath, options = {}) {
 
   const files = {};
   const tags = {};
+  const allTags = {};
   const basenameToIds = {};
+  // Obsidian resolves links case-insensitively, so index lower-cased names too.
+  const lowerToIds = {};
+  const relPathToId = {};
   for (const { basename, filePath, entry } of raw) {
     const id = noteId(basename, filePath, vaultPath, duplicatedBasenames);
     files[id] = {
@@ -474,10 +636,28 @@ function materializeGraph(entries, vaultPath, options = {}) {
       wikilinks: entry.wikilinks,
       mtimeMs: entry.mtimeMs
     };
-    if (entry.tag) tags[id] = entry.tag;
+    const entryTags = entry.tags || (entry.tag ? [entry.tag] : []);
+    if (entryTags.length) { tags[id] = entryTags[0]; allTags[id] = entryTags; }
     if (!basenameToIds[basename]) basenameToIds[basename] = [];
     basenameToIds[basename].push(id);
+    const lower = basename.toLowerCase();
+    if (!lowerToIds[lower]) lowerToIds[lower] = [];
+    lowerToIds[lower].push(id);
+    relPathToId[path.relative(vaultPath, filePath).replace(/\.md$/, '').replace(/\\/g, '/').toLowerCase()] = id;
   }
+  // Resolve a [[link]] target to note ids: exact basename, then a vault-relative
+  // path ([[Folder/Note]]), then the last path segment, then case-insensitively.
+  const resolveTarget = target => {
+    if (basenameToIds[target]) return basenameToIds[target];
+    if (target.includes('/')) {
+      const byPath = relPathToId[target.replace(/^\/+/, '').toLowerCase()];
+      if (byPath) return [byPath];
+      const last = target.slice(target.lastIndexOf('/') + 1);
+      if (basenameToIds[last]) return basenameToIds[last];
+      if (lowerToIds[last.toLowerCase()]) return lowerToIds[last.toLowerCase()];
+    }
+    return lowerToIds[target.toLowerCase()] || null;
+  };
 
   if (duplicatedBasenames.size > 0) {
     const names = Array.from(duplicatedBasenames).sort().join(', ');
@@ -488,6 +668,7 @@ function materializeGraph(entries, vaultPath, options = {}) {
     const node = { id };
     if (files[id].basename !== id) node.label = files[id].basename;
     if (tags[id]) node.tag = tags[id];
+    if (allTags[id] && allTags[id].length > 1) node.tags = allTags[id];
     if (files[id].mtimeMs) node.mtime = files[id].mtimeMs;
     // Top-level folder under the vault, for `nodeColorMode: 'folder'`. Omitted
     // for notes at the vault root (they color as the accent).
@@ -502,7 +683,7 @@ function materializeGraph(entries, vaultPath, options = {}) {
   const ghostIds = new Set();
   for (const [sourceId, file] of Object.entries(files)) {
     for (const targetBasename of file.wikilinks) {
-      const targetIds = basenameToIds[targetBasename] || (nodeSet.has(targetBasename) ? [targetBasename] : []);
+      const targetIds = resolveTarget(targetBasename) || (nodeSet.has(targetBasename) ? [targetBasename] : []);
       if (targetIds.length === 0 && showUnresolved && targetBasename.length > 0) {
         if (!ghostIds.has(targetBasename)) {
           ghostIds.add(targetBasename);
@@ -528,8 +709,8 @@ function materializeGraph(entries, vaultPath, options = {}) {
   }
 
   const discoveredTags = {};
-  for (const tag of Object.values(tags)) {
-    discoveredTags[tag] = (discoveredTags[tag] || 0) + 1;
+  for (const list of Object.values(allTags)) {
+    for (const tag of list) discoveredTags[tag] = (discoveredTags[tag] || 0) + 1;
   }
 
   return {
@@ -568,13 +749,23 @@ function defaultHeaders(contentType, cacheControl) {
     'Cache-Control': cacheControl,
     'Cross-Origin-Opener-Policy': 'same-origin',
     'Cross-Origin-Embedder-Policy': 'require-corp',
-    'Cross-Origin-Resource-Policy': 'same-origin'
+    'Cross-Origin-Resource-Policy': 'same-origin',
+    // Never let a browser sniff a JSON or text response (some carry note
+    // text) into HTML.
+    'X-Content-Type-Options': 'nosniff'
   };
 }
 
-function serveBuffer(res, body, contentType, cacheControl = DYNAMIC_CACHE_CONTROL) {
-  res.writeHead(200, defaultHeaders(contentType, cacheControl));
-  res.end(body);
+// Every dynamic API response is JSON. A dedicated helper with a literal
+// content type (plus nosniff) makes that explicit: some payloads carry text
+// from vault files, and it must never be interpreted as HTML.
+function serveJson(res, value) {
+  const headers = defaultHeaders('application/json; charset=utf-8', DYNAMIC_CACHE_CONTROL);
+  for (const [name, v] of Object.entries(headers)) res.setHeader(name, v);
+  // Set literally so static analysis can see this response is never HTML.
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.statusCode = 200;
+  res.end(JSON.stringify(value));
 }
 
 function serveFile(res, filePath, cacheControl = STATIC_CACHE_CONTROL) {
@@ -657,14 +848,22 @@ function broadcastEvent(state, event, payload) {
   }
 }
 
+// The server answers /graph.json from memory, so graph.json on disk is only a
+// cold-start fallback and a debugging aid. It is written on the first build and
+// on shutdown, not on every edit (that used to cost a full disk write per save).
 async function rebuildGraphState(state, options = {}) {
   const result = materializeGraph(state.entries, state.cfg.vaultPath, {
     showUnresolvedLinks: state.cfg.showUnresolvedLinks
   });
   state.discoveredTags = result.discoveredTags;
   state.graphJson = serializeGraph(result);
+  // Content hash, not the version counter: versions restart at 1 when the
+  // server restarts, so a version-based ETag could match different content.
+  state.graphEtag = `"g${hashString(state.graphJson).toString(36)}-${state.graphJson.length}"`;
+  state.graphGzip = null; // compressed lazily per version
   state.graphVersion = (state.graphVersion || 0) + 1;
-  if (options.writeToDisk !== false) {
+  state.realNoteIds = result.nodes.filter(n => !n.ghost).map(n => n.id);
+  if (options.writeToDisk === true && state.outPath) {
     await writeGraphFile(state.graphJson, state.outPath);
   }
   const ghostCount = result.nodes.filter(node => node.ghost).length;
@@ -714,11 +913,103 @@ async function applyFsEventToState(state, event, filePath) {
   const prev = state.entries.get(filePath);
   state.entries.set(filePath, nextEntry);
   if (!prev) return true;
+  const prevTags = prev.tags || (prev.tag ? [prev.tag] : []);
+  const nextTags = nextEntry.tags || [];
   return prev.mtimeMs !== nextEntry.mtimeMs
-    || prev.tag !== nextEntry.tag
+    || prevTags.length !== nextTags.length
+    || prevTags.some((t, i) => t !== nextTags[i])
     || prev.basename !== nextEntry.basename
     || prev.wikilinks.length !== nextEntry.wikilinks.length
     || prev.wikilinks.some((link, index) => link !== nextEntry.wikilinks[index]);
+}
+
+function hashString(s) {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
+  return h >>> 0;
+}
+
+// Reads at most `limit` bytes: an excerpt never needs a whole (possibly huge) file.
+async function readHead(filePath, limit) {
+  const fh = await fs.promises.open(filePath, 'r');
+  try {
+    const buf = Buffer.alloc(limit);
+    const { bytesRead } = await fh.read(buf, 0, limit, 0);
+    return buf.subarray(0, bytesRead).toString('utf8');
+  } finally {
+    await fh.close();
+  }
+}
+
+async function pickNoteOfHour(state, hourParam) {
+  const ids = state.realNoteIds || [];
+  const entries = state.entries ? Array.from(state.entries.values()) : [];
+  if (!entries.length) return { title: '', excerpt: '', folder: '', mtime: 0 };
+  const hourKey = /^\d{1,10}$/.test(hourParam || '') ? hourParam : String(Math.floor(Date.now() / 3600000));
+  // Sort by path so the pick is stable regardless of Map insertion order.
+  const sorted = entries.slice().sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  // Prefer notes with some body text; try a few candidates before giving up.
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const entry = sorted[hashString(hourKey + ':' + attempt) % sorted.length];
+    let content;
+    try { content = await readHead(entry.path, 64 * 1024); } catch (_) { continue; }
+    const excerpt = noteExcerpt(content);
+    if (excerpt.length < 24 && attempt < 7) continue;
+    const rel = path.relative(state.cfg.vaultPath, entry.path);
+    const sep = rel.lastIndexOf(path.sep);
+    return {
+      title: entry.basename,
+      excerpt,
+      folder: sep > 0 ? rel.slice(0, sep).replace(/\\/g, '/') : '',
+      mtime: entry.mtimeMs || 0,
+      noteCount: ids.length || entries.length
+    };
+  }
+  return { title: '', excerpt: '', folder: '', mtime: 0 };
+}
+
+// Custom presets live in a sidecar file next to the config, not in browser
+// localStorage (which is per-origin, so it was lost whenever the port changed).
+function customPresetsPath(state) {
+  return path.join(path.dirname(state.configPath || cfgPath), 'custom-presets.json');
+}
+function readCustomPresets(state) {
+  try {
+    const list = JSON.parse(fs.readFileSync(customPresetsPath(state), 'utf8'));
+    return Array.isArray(list) ? list : [];
+  } catch (_) {
+    return [];
+  }
+}
+async function handleCustomPresets(state, req, res, requestUrl) {
+  const json = (code, body) => {
+    res.writeHead(code, defaultHeaders('application/json', DYNAMIC_CACHE_CONTROL));
+    res.end(JSON.stringify(body));
+  };
+  if (!isTrustedHost(req.headers.host)) return json(403, { error: 'untrusted Host header' });
+  if (req.method === 'GET') return json(200, readCustomPresets(state));
+  try {
+    if (req.method === 'POST') {
+      if (req.headers['content-type'] !== 'application/json') return json(415, { error: 'Content-Type must be application/json' });
+      const body = JSON.parse(await readBody(req, res));
+      const name = validateString(body && body.name, 'name', 60);
+      if (!name) throw new Error('name is required');
+      const config = sanitizeConfigPatch(body.config || {});
+      const list = readCustomPresets(state).filter(p => p.name !== name);
+      list.push({ name, description: 'Custom preset', accent: config.accent || state.cfg.accent, background: config.background || state.cfg.background, custom: true, config });
+      writeConfigFile(list, customPresetsPath(state));
+      return json(200, list);
+    }
+    if (req.method === 'DELETE') {
+      const name = requestUrl.searchParams.get('name') || '';
+      const list = readCustomPresets(state).filter(p => p.name !== name);
+      writeConfigFile(list, customPresetsPath(state));
+      return json(200, list);
+    }
+    return json(405, { error: 'method not allowed' });
+  } catch (e) {
+    if (!res.writableEnded) json(400, { error: e.message });
+  }
 }
 
 function createRequestHandler(state) {
@@ -752,20 +1043,47 @@ function createRequestHandler(state) {
     }
 
     if (url === '/api/state' && req.method === 'GET') {
-      serveBuffer(res, JSON.stringify({
+      serveJson(res, {
         graphVersion: state.graphVersion,
         configVersion: state.configVersion
-      }), 'application/json');
+      });
       return;
     }
 
     if (url === '/api/config' && req.method === 'GET') {
-      serveBuffer(res, JSON.stringify(state.safeConfig), 'application/json');
+      serveJson(res, state.safeConfig);
       return;
     }
 
     if (url === '/api/defaults' && req.method === 'GET') {
-      serveBuffer(res, JSON.stringify(buildSafeConfig({ ...DEFAULTS })), 'application/json');
+      serveJson(res, buildSafeConfig({ ...DEFAULTS }));
+      return;
+    }
+
+    if (url === '/api/themes' && req.method === 'GET') {
+      serveJson(res, THEME_LIST);
+      return;
+    }
+
+    // One note per clock hour, picked deterministically so every screen agrees.
+    // Reads the file on demand rather than shipping excerpts in graph.json.
+    if (url === '/api/note-of-hour' && req.method === 'GET') {
+      // Returns note text, so it gets the same DNS-rebinding guard as writes.
+      if (!isTrustedHost(req.headers.host)) {
+        res.writeHead(403, defaultHeaders('application/json', DYNAMIC_CACHE_CONTROL));
+        res.end(JSON.stringify({ error: 'untrusted Host header' }));
+        return;
+      }
+      const note = await pickNoteOfHour(state, requestUrl.searchParams.get('hour'));
+      // Note text is only ever sent as JSON (with nosniff); the renderer
+      // inserts it with HTML escaping.
+      res.writeHead(200, defaultHeaders('application/json; charset=utf-8', DYNAMIC_CACHE_CONTROL));
+      res.end(JSON.stringify(note));
+      return;
+    }
+
+    if (url === '/api/custom-presets') {
+      await handleCustomPresets(state, req, res, requestUrl);
       return;
     }
 
@@ -788,9 +1106,11 @@ function createRequestHandler(state) {
         state.cfg = updated;
         state.safeConfig = buildSafeConfig(updated);
         state.configVersion += 1;
-        serveBuffer(res, JSON.stringify(state.safeConfig), 'application/json');
+        serveJson(res, state.safeConfig);
         broadcastEvent(state, 'config', { version: state.configVersion });
-        if (Object.prototype.hasOwnProperty.call(patch, 'showUnresolvedLinks')) {
+        if (Object.prototype.hasOwnProperty.call(patch, 'ignorePaths') && state.onIgnorePathsChanged) {
+          await state.onIgnorePathsChanged();
+        } else if (Object.prototype.hasOwnProperty.call(patch, 'showUnresolvedLinks')) {
           await rebuildGraphState(state);
           broadcastEvent(state, 'graph', { version: state.graphVersion });
         }
@@ -804,7 +1124,7 @@ function createRequestHandler(state) {
     }
 
     if (url === '/api/tags' && req.method === 'GET') {
-      serveBuffer(res, JSON.stringify(state.discoveredTags || {}), 'application/json');
+      serveJson(res, state.discoveredTags || {});
       return;
     }
 
@@ -812,7 +1132,26 @@ function createRequestHandler(state) {
       const graphJson = state.graphJson || (state.outPath && fs.existsSync(state.outPath)
         ? fs.readFileSync(state.outPath, 'utf8')
         : JSON.stringify({ nodes: [], links: [] }));
-      serveBuffer(res, graphJson, 'application/json');
+      // ETag per graph version: a client that already has this version gets a
+      // 304 instead of re-downloading a multi-megabyte graph.
+      const etag = state.graphJson ? state.graphEtag || `"g${hashString(graphJson).toString(36)}-${graphJson.length}"` : `"g0-${graphJson.length}"`;
+      if (req.headers['if-none-match'] === etag) {
+        res.writeHead(304, { ...defaultHeaders('application/json', DYNAMIC_CACHE_CONTROL), ETag: etag });
+        res.end();
+        return;
+      }
+      const headers = { ...defaultHeaders('application/json', DYNAMIC_CACHE_CONTROL), ETag: etag, Vary: 'Accept-Encoding' };
+      if (graphJson.length > 8192 && /\bgzip\b/.test(req.headers['accept-encoding'] || '')) {
+        if (!state.graphGzip || state.graphGzipFor !== etag) {
+          state.graphGzip = zlib.gzipSync(graphJson, { level: 6 });
+          state.graphGzipFor = etag;
+        }
+        res.writeHead(200, { ...headers, 'Content-Encoding': 'gzip', 'Content-Length': String(state.graphGzip.length) });
+        res.end(state.graphGzip);
+        return;
+      }
+      res.writeHead(200, headers);
+      res.end(graphJson);
       return;
     }
 
@@ -857,7 +1196,7 @@ function createRequestHandler(state) {
       return;
     }
     const cacheControl = path.extname(filePath) === '.html' ? DYNAMIC_CACHE_CONTROL
-      : (url === '/worker.js' || url === '/renderer-core.js') ? APP_ASSET_CACHE_CONTROL
+      : APP_ASSETS.has(url) ? APP_ASSET_CACHE_CONTROL
       : STATIC_CACHE_CONTROL;
     serveFile(res, filePath, cacheControl);
   };
@@ -895,6 +1234,7 @@ async function startApp(options = {}) {
 
   try {
     await rebuild();
+    await writeGraphFile(state.graphJson, state.outPath).catch(() => {});
   } catch (e) {
     console.error(`startup failed: ${e.message}`);
     process.exit(1);
@@ -923,11 +1263,13 @@ async function startApp(options = {}) {
     const nextSafe = buildSafeConfig(merged);
     if (JSON.stringify(nextSafe) === JSON.stringify(state.safeConfig)) return; // echo of our own write / no change
     const unresolvedChanged = merged.showUnresolvedLinks !== state.cfg.showUnresolvedLinks;
+    const ignoreChanged = JSON.stringify(merged.ignorePaths) !== JSON.stringify(state.cfg.ignorePaths);
     state.cfg = merged;
     state.safeConfig = nextSafe;
     state.configVersion += 1;
     broadcastEvent(state, 'config', { version: state.configVersion });
-    if (unresolvedChanged) rebuild().catch(e => console.error(`build failed: ${e.message}`));
+    if (ignoreChanged) state.onIgnorePathsChanged().catch(e => console.error(`rescan failed: ${e.message}`));
+    else if (unresolvedChanged) rebuild().catch(e => console.error(`build failed: ${e.message}`));
     console.log('config.json reloaded');
   }
 
@@ -950,41 +1292,55 @@ async function startApp(options = {}) {
   };
 
   const AWAIT_WRITE_FINISH_MS = 300;
-  // Skip dotfiles/dot-directories, and any *file* whose extension is not .md.
-  // The extension check must not fire on directories (e.g. "notes.v2"), or
-  // chokidar silently never descends into them while the scan still does.
-  const chokidarIgnores = [
-    /(^|[/\\])\./,
-    (filePath, stats) => {
-      // chokidar calls this once without stats and again with them; only
-      // decide when we know it is a file (applyFsEventToState filters .md anyway).
-      if (!stats || !stats.isFile()) return false;
-      return path.extname(filePath).toLowerCase() !== '.md';
-    },
-  ];
-  if (state.cfg.ignorePaths && state.cfg.ignorePaths.length) {
-    const vaultRoot = path.resolve(state.cfg.vaultPath);
-    chokidarIgnores.push(filePath => {
-      // chokidar calls the ignore callback on the watch root itself first;
-      // isIgnoredPath treats an empty relative path as outside the vault, so
-      // guard the root explicitly or the whole watch is discarded.
-      if (path.resolve(filePath) === vaultRoot) return false;
-      return isIgnoredPath(filePath, vaultRoot, state.cfg.ignorePaths);
+  // The vault watcher is (re)created from the current ignorePaths. Changing
+  // ignorePaths in settings or config.json closes it, rescans the vault and
+  // starts a new one, so the scan and the watcher never disagree.
+  function createVaultWatcher() {
+    // Skip dotfiles/dot-directories, and any *file* whose extension is not .md.
+    // The extension check must not fire on directories (e.g. "notes.v2"), or
+    // chokidar silently never descends into them while the scan still does.
+    const chokidarIgnores = [
+      /(^|[/\\])\./,
+      (filePath, stats) => {
+        // chokidar calls this once without stats and again with them; only
+        // decide when we know it is a file (applyFsEventToState filters .md anyway).
+        if (!stats || !stats.isFile()) return false;
+        return path.extname(filePath).toLowerCase() !== '.md';
+      },
+    ];
+    const ignorePaths = state.cfg.ignorePaths ? state.cfg.ignorePaths.slice() : [];
+    if (ignorePaths.length) {
+      const vaultRoot = path.resolve(state.cfg.vaultPath);
+      chokidarIgnores.push(filePath => {
+        // chokidar calls the ignore callback on the watch root itself first;
+        // isIgnoredPath treats an empty relative path as outside the vault, so
+        // guard the root explicitly or the whole watch is discarded.
+        if (path.resolve(filePath) === vaultRoot) return false;
+        return isIgnoredPath(filePath, vaultRoot, ignorePaths);
+      });
+    }
+    const w = chokidar.watch(state.cfg.vaultPath, {
+      ignoreInitial: true,
+      ignored: chokidarIgnores,
+      awaitWriteFinish: { stabilityThreshold: AWAIT_WRITE_FINISH_MS }
     });
+    w.on('all', (event, filePath) => {
+      applyFsEventToState(state, event, filePath)
+        .then(changed => { if (changed) debouncedRebuild(); })
+        .catch(e => console.error(`watch update failed: ${e.message}`));
+    }).on('error', e => {
+      console.error('watcher error:', e.message);
+    });
+    return w;
   }
-  const watcher = chokidar.watch(state.cfg.vaultPath, {
-    ignoreInitial: true,
-    ignored: chokidarIgnores,
-    awaitWriteFinish: { stabilityThreshold: AWAIT_WRITE_FINISH_MS }
-  });
-
-  watcher.on('all', (event, filePath) => {
-    applyFsEventToState(state, event, filePath)
-      .then(changed => { if (changed) debouncedRebuild(); })
-      .catch(e => console.error(`watch update failed: ${e.message}`));
-  }).on('error', e => {
-    console.error('watcher error:', e.message);
-  });
+  let watcher = createVaultWatcher();
+  state.onIgnorePathsChanged = async () => {
+    try { await watcher.close(); } catch (_) {}
+    state.entries = await scanVaultEntries(state.cfg.vaultPath, state.cfg.ignorePaths);
+    await rebuild();
+    watcher = createVaultWatcher();
+    console.log('ignorePaths changed: vault rescanned');
+  };
 
   server.listen(state.cfg.port, '127.0.0.1', () => {
     console.log(`wallpaper:  http://127.0.0.1:${state.cfg.port}`);
@@ -1013,6 +1369,9 @@ async function startApp(options = {}) {
     }
     try { await watcher.close(); } catch (_) {}
     try { await configWatcher.close(); } catch (_) {}
+    if (state.graphJson && state.outPath) {
+      try { await writeGraphFile(state.graphJson, state.outPath); } catch (_) {}
+    }
     server.close(() => process.exit(0));
     // Fallback in case server.close()'s callback never fires (e.g. a lingering
     // keep-alive connection). unref'd so this timer alone never keeps the
@@ -1022,7 +1381,7 @@ async function startApp(options = {}) {
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 
-  return { server, watcher, configWatcher, state, rebuild };
+  return { server, get watcher() { return watcher; }, configWatcher, state, rebuild };
 }
 
 if (require.main === module) {
@@ -1038,7 +1397,12 @@ module.exports = {
   sanitizePersistedConfig,
   sanitizeConfigPatch,
   extractTag,
+  extractTags,
   extractWikilinks,
+  noteExcerpt,
+  discoverThemes,
+  THEME_LIST,
+  configPathFromArgs,
   noteId,
   buildGraph,
   createRequestHandler,

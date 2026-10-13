@@ -5,9 +5,10 @@
 //   node scripts/screenshot-presets.js new        # presets.json at thumbnail size
 //   node scripts/screenshot-presets.js new-large  # presets.json at 200/2000/10000 for record
 //
-// Assumes the HTTP server is already running at 127.0.0.1:<port from config.json>.
-// Does NOT POST to /api/config (keeps the user's real cfg untouched); presets
-// are injected via the ?synthetic=N&cfgjson=... query params which bypass polling.
+// Starts its own throwaway server (the renderer only needs the static files;
+// the graph is synthetic), so it never touches the user's config. Presets are
+// injected via ?synthetic=N&cfgjson=... . Synthetic graphs up to 3000 notes are
+// settled with the real layout code, so thumbnails look like a real vault.
 
 const fs = require('fs');
 const path = require('path');
@@ -22,10 +23,19 @@ if (!CHROME) {
   process.exit(1);
 }
 const HOST = '127.0.0.1';
-const PORT = (() => {
-  try { return JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8')).port || 3000; }
-  catch { return 3000; }
-})();
+const PORT = parseInt(process.env.SCREENSHOT_PORT || '3996', 10);
+
+async function startThrowawayServer() {
+  const os = require('os');
+  const { startApp } = require('../parser.js');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'olw-shots-'));
+  const vault = path.join(dir, 'vault');
+  fs.mkdirSync(vault, { recursive: true });
+  fs.writeFileSync(path.join(vault, 'A.md'), '[[B]]\n');
+  const configPath = path.join(dir, 'config.json');
+  fs.writeFileSync(configPath, JSON.stringify({ vaultPath: vault, port: PORT }));
+  return startApp({ configPath, outPath: path.join(dir, 'graph.json') });
+}
 
 function waitForServer(ms = 20000) {
   return new Promise((resolve, reject) => {
@@ -91,6 +101,7 @@ function delayForSize(size) {
 
 async function main() {
   const mode = process.argv[2] || 'new';
+  await startThrowawayServer();
   await waitForServer();
 
   if (mode === 'new') {
@@ -98,12 +109,14 @@ async function main() {
     const outDir = path.join(ROOT, 'docs/presets');
     fs.mkdirSync(outDir, { recursive: true });
     for (const preset of presets) {
-      const out = path.join(outDir, `${preset.name.toLowerCase()}.png`);
-      const url = buildUrl(2000, preset.config);
+      const file = preset.thumbnail ? path.basename(preset.thumbnail) : `${preset.name.toLowerCase().replace(/\s+/g, '-')}.png`;
+      const out = path.join(outDir, file);
+      const url = buildUrl(700, preset.config);
       process.stdout.write(`thumb ${preset.name} → `);
       try { await screenshot(url, out, { width: 960, height: 540, delayMs: 6000 }); console.log('ok'); }
       catch (e) { console.log('FAIL', e.message); }
     }
+    process.exit(0);
   } else if (mode === 'new-large') {
     const presets = readNewPresets();
     const sizes = [200, 2000, 10000];

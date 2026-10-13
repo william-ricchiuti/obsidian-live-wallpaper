@@ -1,3 +1,5 @@
+// @name Celestial
+// @description A star chart: notes become stars with diffraction spikes and orbital rings, slowly rotating around the pole.
 // themes/celestial.js — Star chart / celestial navigation theme.
 // Loaded as plain <script> after registry.js; THEMES is a global.
 // Uses globals: cfg, nodes, links, ctx, canvas, sceneTuning, tick, innerWidth, innerHeight,
@@ -10,6 +12,7 @@
   let rotationAngle = 0;
 
   THEMES.celestial = {
+    kind: 'hooks', name: 'Celestial', dark: true, background: '#020408',
     drawBackground: function () {
       ctx.fillStyle = '#020408';
       ctx.fillRect(0, 0, innerWidth, innerHeight);
@@ -48,7 +51,7 @@
     },
 
     drawNodes: function () {
-      rotationAngle = (tick * 0.0001 * sceneTuning.motion.driftAmp) % (Math.PI * 2);
+      rotationAngle = (motionTime() * 0.0001 * sceneTuning.motion.driftAmp) % (Math.PI * 2);
       const cx = innerWidth / 2, cy = innerHeight / 2;
       const cap = sceneTuning.maxRenderedNodes || 0;
       const cullActive = __cullFrame === tick;
@@ -102,7 +105,7 @@
           const [cr, cg, cb] = hexToRGB(color);
           const ringCount = importance > 0.8 ? 3 : importance > 0.6 ? 2 : 1;
           for (let j = 0; j < ringCount; j++) {
-            const rr = 10 + j * 7 + Math.sin(tick * 0.02 + rx * 0.01) * 2;
+            const rr = 10 + j * 7 + Math.sin(motionTime() * 0.02 + rx * 0.01) * 2;
             ctx.strokeStyle = rgba(cr, cg, cb, 0.12);
             ctx.lineWidth = 0.5;
             ctx.beginPath();

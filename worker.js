@@ -1,93 +1,80 @@
-// Force-simulation worker. Runs d3.forceSimulation off the main thread.
-// When SharedArrayBuffer is available, positions are written into shared memory
-// and the main thread reads them directly; otherwise we fall back to throttled
-// postMessage snapshots of x/y only.
-importScripts('/vendor/d3.min.js');
+// Force-simulation worker. Owns the d3 simulation so layout never stalls the
+// main thread. The simulation is driven manually (sim.stop() + sim.tick()) on a
+// fixed ~16ms step instead of d3-timer, which in a worker falls back to
+// setTimeout(17) and gives no control over the work per message.
+//
+// Positions reach the main thread one of two ways:
+//   - SharedArrayBuffer (when the page is cross-origin isolated): written in
+//     place, and a small 'tick' message only carries alpha.
+//   - Otherwise a fresh Float32Array per snapshot, *transferred* (zero-copy)
+//     rather than structured-cloned.
+importScripts('/vendor/d3.min.js', '/layout-core.js');
 
 let sim = null;
 let nodes = [];
-let links = [];
-let clusterByTag = true;
-let idleFrames = 0;
 let generation = 0;
 let sharedPositions = null;
-let useSharedPositions = false;
-let lastTickPostAt = 0;
-let snapBuf = null; // reused snapshot buffer for the non-shared fallback path
+let running = false;
+let stepTimer = null;
+let lastPostAt = 0;
+let idleTicks = 0;
 
-const SNAPSHOT_INTERVAL_MS = 50;
-
-// Node-count tiers driving simulation cost: fewer/weaker forces as the graph
-// grows, so a large vault stays responsive instead of grinding to a crawl.
-const MASSIVE_NODE_THRESHOLD = 3000;
-const LARGE_NODE_THRESHOLD = 600;
-const MEDIUM_NODE_THRESHOLD = 200;
-const SMALL_NODE_THRESHOLD = 50;
-
-// Simulation is considered settled once alpha decays below this and stays
-// there for IDLE_FRAMES_TO_STOP consecutive ticks.
+const STEP_MS = 16;
+const SNAPSHOT_INTERVAL_MS = 33;
+// The simulation counts as settled once alpha stays below this for
+// IDLE_TICKS_TO_STOP consecutive ticks.
 const IDLE_ALPHA_THRESHOLD = 0.02;
-const IDLE_FRAMES_TO_STOP = 30;
+const IDLE_TICKS_TO_STOP = 30;
+// Upper bound on ticks per step for small graphs, so a warm start finishes
+// quickly without one step blocking for long on big ones.
+const STEP_BUDGET_MS = 10;
 
-function forceCluster(alpha) {
-  if (!clusterByTag) return;
-  const centroids = Object.create(null);
-  const counts = Object.create(null);
+function writePositions(target) {
   for (let i = 0; i < nodes.length; i++) {
-    const node = nodes[i];
-    if (!node.tag) continue;
-    if (!Number.isFinite(node.x) || !Number.isFinite(node.y)) continue;
-    if (!centroids[node.tag]) {
-      centroids[node.tag] = { x: 0, y: 0 };
-      counts[node.tag] = 0;
-    }
-    centroids[node.tag].x += node.x;
-    centroids[node.tag].y += node.y;
-    counts[node.tag] += 1;
-  }
-  for (const tag in centroids) {
-    centroids[tag].x /= counts[tag];
-    centroids[tag].y /= counts[tag];
-  }
-  const strength = 0.03 * alpha;
-  for (let i = 0; i < nodes.length; i++) {
-    const node = nodes[i];
-    if (!node.tag || !centroids[node.tag]) continue;
-    node.vx = (Number.isFinite(node.vx) ? node.vx : 0) + (centroids[node.tag].x - node.x) * strength;
-    node.vy = (Number.isFinite(node.vy) ? node.vy : 0) + (centroids[node.tag].y - node.y) * strength;
+    const n = nodes[i];
+    target[i * 2] = Number.isFinite(n.x) ? n.x : 0;
+    target[i * 2 + 1] = Number.isFinite(n.y) ? n.y : 0;
   }
 }
 
-function publishPositions() {
-  if (!useSharedPositions || !sharedPositions) return;
-  for (let i = 0; i < nodes.length; i++) {
-    const node = nodes[i];
-    sharedPositions[i * 2] = Number.isFinite(node.x) ? node.x : 0;
-    sharedPositions[i * 2 + 1] = Number.isFinite(node.y) ? node.y : 0;
-  }
-}
-
-function sendSnapshot(type, force) {
+function post(type, force) {
   const now = performance.now();
-  if (!force && now - lastTickPostAt < SNAPSHOT_INTERVAL_MS) return;
-  lastTickPostAt = now;
-
-  if (useSharedPositions) {
-    postMessage({ type, alpha: sim ? sim.alpha() : 0, generation, count: nodes.length });
+  if (!force && now - lastPostAt < SNAPSHOT_INTERVAL_MS) return;
+  lastPostAt = now;
+  const alpha = sim ? sim.alpha() : 0;
+  if (sharedPositions) {
+    writePositions(sharedPositions);
+    postMessage({ type, alpha, generation, count: nodes.length });
     return;
   }
+  const buf = new Float32Array(nodes.length * 2);
+  writePositions(buf);
+  postMessage({ type, buffer: buf.buffer, alpha, generation, count: nodes.length }, [buf.buffer]);
+}
 
-  const len = nodes.length;
-  // Reuse one buffer across ticks instead of allocating each time. We post a
-  // (structured-clone) copy rather than transferring, so the buffer stays owned
-  // by the worker and the main thread receives its own copy.
-  if (!snapBuf || snapBuf.length !== len * 2) snapBuf = new Float32Array(len * 2);
-  for (let i = 0; i < len; i++) {
-    const node = nodes[i];
-    snapBuf[i * 2] = Number.isFinite(node.x) ? node.x : 0;
-    snapBuf[i * 2 + 1] = Number.isFinite(node.y) ? node.y : 0;
-  }
-  postMessage({ type, buffer: snapBuf.buffer, alpha: sim ? sim.alpha() : 0, generation, count: len });
+function stop(type) {
+  running = false;
+  if (stepTimer) { clearTimeout(stepTimer); stepTimer = null; }
+  post(type || 'stopped', true);
+}
+
+function step() {
+  stepTimer = null;
+  if (!running || !sim) return;
+  const t0 = performance.now();
+  // Small graphs: 1 tick per step keeps the settle animation smooth.
+  // Large graphs: one tick may already exceed the budget, which is fine.
+  const maxTicks = nodes.length < 400 ? 1 : 2;
+  let ticks = 0;
+  do {
+    sim.tick();
+    ticks++;
+    if (sim.alpha() < IDLE_ALPHA_THRESHOLD) idleTicks++;
+    else idleTicks = 0;
+  } while (ticks < maxTicks && performance.now() - t0 < STEP_BUDGET_MS && idleTicks < IDLE_TICKS_TO_STOP);
+  if (idleTicks >= IDLE_TICKS_TO_STOP) { stop('stopped'); return; }
+  post('tick', false);
+  stepTimer = setTimeout(step, Math.max(0, STEP_MS - (performance.now() - t0)));
 }
 
 self.onmessage = (e) => {
@@ -95,71 +82,27 @@ self.onmessage = (e) => {
   if (!msg) return;
 
   if (msg.type === 'start') {
-    if (sim) {
-      sim.stop();
-      sim = null;
-    }
-
+    if (stepTimer) { clearTimeout(stepTimer); stepTimer = null; }
     generation = msg.generation || (generation + 1);
     nodes = msg.nodes || [];
-    links = msg.links || [];
-    clusterByTag = !!msg.clusterByTag;
-    idleFrames = 0;
-    lastTickPostAt = 0;
-
-    useSharedPositions = !!msg.sharedBuffer;
-    sharedPositions = useSharedPositions ? new Float32Array(msg.sharedBuffer) : null;
-
-    const count = nodes.length;
-    if (count === 0) {
-      sendSnapshot('stopped', true);
-      return;
-    }
-
-    const isMassive = count > MASSIVE_NODE_THRESHOLD;
-    const charge = isMassive ? -4
-      : count > LARGE_NODE_THRESHOLD ? -10
-      : count > MEDIUM_NODE_THRESHOLD ? -15
-      : count > SMALL_NODE_THRESHOLD ? -25
-      : -30;
-    const distance = isMassive ? 16
-      : count > LARGE_NODE_THRESHOLD ? 24
-      : count > MEDIUM_NODE_THRESHOLD ? 30
-      : 40;
-
-    sim = d3.forceSimulation(nodes)
-      .force('link', d3.forceLink(links).id(node => node.id).distance(distance).strength(isMassive ? 0.15 : 0.3))
-      .force('charge', d3.forceManyBody().strength(charge).theta(isMassive ? 1.2 : 0.9))
-      .force('center', d3.forceCenter(msg.centerX || 0, msg.centerY || 0))
-      .force('collide', isMassive ? null : d3.forceCollide().radius(node => (node.r || 4) + 2))
-      .alphaDecay(isMassive ? 0.05 : count > LARGE_NODE_THRESHOLD ? 0.03 : 0.02)
-      .velocityDecay(isMassive ? 0.75 : count > LARGE_NODE_THRESHOLD ? 0.68 : 0.6)
-      .on('tick', () => {
-        const alpha = sim.alpha();
-        if (alpha < IDLE_ALPHA_THRESHOLD) {
-          idleFrames += 1;
-          if (idleFrames >= IDLE_FRAMES_TO_STOP) {
-            publishPositions();
-            sim.stop();
-            sendSnapshot('stopped', true);
-            return;
-          }
-        } else {
-          idleFrames = 0;
-        }
-
-        forceCluster(alpha);
-        publishPositions();
-        sendSnapshot('tick', false);
-      });
-
-    publishPositions();
-    sendSnapshot('tick', true);
+    sharedPositions = msg.sharedBuffer ? new Float32Array(msg.sharedBuffer) : null;
+    idleTicks = 0;
+    lastPostAt = 0;
+    if (nodes.length === 0) { sim = null; stop('stopped'); return; }
+    sim = LayoutCore.createSimulation(d3, nodes, msg.links || [], {
+      layout: msg.layout,
+      width: msg.width,
+      height: msg.height,
+      centerX: msg.centerX,
+      centerY: msg.centerY,
+      clusterByTag: !!msg.clusterByTag,
+      alpha: typeof msg.alpha === 'number' ? msg.alpha : 1,
+      now: msg.now
+    });
+    running = true;
+    post('tick', true);
+    stepTimer = setTimeout(step, 0);
   } else if (msg.type === 'stop') {
-    if (sim) sim.stop();
-    publishPositions();
-    sendSnapshot('stopped', true);
-  } else if (msg.type === 'setCluster') {
-    clusterByTag = !!msg.clusterByTag;
+    stop('stopped');
   }
 };
