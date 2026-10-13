@@ -150,7 +150,7 @@ const FRONTMATTER = /^---\r?\n([\s\S]*?)\r?\n---/;
 const TAGS_FLOW = /^tags:\s*\[([^\]]*)\]/m;
 // [ \t] rather than \s so the pattern can't backtrack across newlines
 // (CodeQL js/polynomial-redos on files with many "\n " repetitions).
-const TAGS_BLOCK = /^tags:[ \t]*\r?\n((?:[ \t]*-[ \t]+.+\r?\n?)+)/m;
+const TAGS_BLOCK = /^tags:[ \t]*\r?\n((?:[ \t]*-[ \t]+\S[^\r\n]*(?:\r?\n|$))+)/m;
 const TAGS_INLINE = /(?:^|\s)#([a-zA-Z][\w-/]*)/g;
 // vendor/d3.min.js is pinned by npm version and never changes without a
 // reinstall, so it's safe to cache long. worker.js/renderer-core.js are our
@@ -756,9 +756,12 @@ function defaultHeaders(contentType, cacheControl) {
   };
 }
 
-function serveBuffer(res, body, contentType, cacheControl = DYNAMIC_CACHE_CONTROL) {
-  res.writeHead(200, defaultHeaders(contentType, cacheControl));
-  res.end(body);
+// Every dynamic API response is JSON. A dedicated helper with a literal
+// content type (plus nosniff) makes that explicit: some payloads carry text
+// from vault files, and it must never be interpreted as HTML.
+function serveJson(res, value) {
+  res.writeHead(200, defaultHeaders('application/json; charset=utf-8', DYNAMIC_CACHE_CONTROL));
+  res.end(JSON.stringify(value));
 }
 
 function serveFile(res, filePath, cacheControl = STATIC_CACHE_CONTROL) {
@@ -1036,25 +1039,25 @@ function createRequestHandler(state) {
     }
 
     if (url === '/api/state' && req.method === 'GET') {
-      serveBuffer(res, JSON.stringify({
+      serveJson(res, {
         graphVersion: state.graphVersion,
         configVersion: state.configVersion
-      }), 'application/json');
+      });
       return;
     }
 
     if (url === '/api/config' && req.method === 'GET') {
-      serveBuffer(res, JSON.stringify(state.safeConfig), 'application/json');
+      serveJson(res, state.safeConfig);
       return;
     }
 
     if (url === '/api/defaults' && req.method === 'GET') {
-      serveBuffer(res, JSON.stringify(buildSafeConfig({ ...DEFAULTS })), 'application/json');
+      serveJson(res, buildSafeConfig({ ...DEFAULTS }));
       return;
     }
 
     if (url === '/api/themes' && req.method === 'GET') {
-      serveBuffer(res, JSON.stringify(THEME_LIST), 'application/json');
+      serveJson(res, THEME_LIST);
       return;
     }
 
@@ -1099,7 +1102,7 @@ function createRequestHandler(state) {
         state.cfg = updated;
         state.safeConfig = buildSafeConfig(updated);
         state.configVersion += 1;
-        serveBuffer(res, JSON.stringify(state.safeConfig), 'application/json');
+        serveJson(res, state.safeConfig);
         broadcastEvent(state, 'config', { version: state.configVersion });
         if (Object.prototype.hasOwnProperty.call(patch, 'ignorePaths') && state.onIgnorePathsChanged) {
           await state.onIgnorePathsChanged();
@@ -1117,7 +1120,7 @@ function createRequestHandler(state) {
     }
 
     if (url === '/api/tags' && req.method === 'GET') {
-      serveBuffer(res, JSON.stringify(state.discoveredTags || {}), 'application/json');
+      serveJson(res, state.discoveredTags || {});
       return;
     }
 
