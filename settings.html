@@ -5,303 +5,297 @@
 <title>Wallpaper Settings</title>
 <!-- Defense in depth: see index.html's CSP comment — same rationale here.
      script-src/style-src need 'unsafe-inline' since this page's logic and
-     dynamic styling are inline rather than in external files. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'">
+     dynamic styling are inline rather than in external files. frame-src 'self'
+     allows the same-origin live preview iframe. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'self'">
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
-    --bg: #0e0e14; --surface: #16161e; --border: #2a2a3a;
+    --bg: #0e0e14; --surface: #16161e; --surface-2: #1d1d28; --border: #2a2a3a;
     --text: #e0e0e8; --dim: #8888a0; --accent: #7c5cff;
-    --radius: 8px;
+    --ok: #50c878; --err: #ff6b6b; --warn: #f0b429;
+    --radius: 10px; --gap: 16px;
+    --focus: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
   }
-  body { font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); padding: 24px; max-width: 640px; margin: 0 auto; padding-bottom: 60px; }
-  h1 { font-size: 20px; font-weight: 600; margin-bottom: 4px; }
+  body.light { --bg: #f4f4f6; --surface: #ffffff; --surface-2: #f0f0f4; --border: #d4d4dc; --text: #1a1a24; --dim: #626274; --ok: #2a8c4a; --err: #cc4444; --warn: #9a6b00; }
+  html { -webkit-text-size-adjust: 100%; }
+  body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.4; padding: 24px 16px 64px; }
+  .page { max-width: 1440px; margin: 0 auto; display: flex; flex-direction: column; gap: 24px; }
+
+  header.top { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+  h1 { font-size: 20px; font-weight: 650; }
   .subtitle { color: var(--dim); font-size: 13px; }
-  .header-bar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 32px; }
+  .top-actions { display: flex; align-items: center; gap: 12px; }
   .conn-status { font-size: 12px; color: var(--dim); }
-  .conn-status.connected { color: #50c878; }
-  .conn-status.disconnected { color: #ff6b6b; opacity: 0.7; }
+  .conn-status.connected { color: var(--ok); }
+  .conn-status.disconnected { color: var(--err); }
 
-  .section { margin-bottom: 28px; }
-  .section-title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; color: var(--dim); margin-bottom: 12px; }
+  .layout { display: flex; flex-direction: column; gap: 24px; }
+  .preview-col { display: flex; flex-direction: column; gap: 10px; width: 100%; max-width: 560px; margin: 0 auto; }
+  .controls-col { display: flex; flex-direction: column; gap: 28px; min-width: 0; }
+  @media (min-width: 1100px) {
+    .layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(380px, 42%); gap: 32px; align-items: start; }
+    .controls-col { grid-column: 1; grid-row: 1; }
+    .preview-col { grid-column: 2; grid-row: 1; position: sticky; top: 16px; max-width: none; margin: 0; }
+  }
+  .preview-frame { width: 100%; aspect-ratio: 16 / 10; border: 1px solid var(--border); border-radius: var(--radius); background: #000; display: block; }
+  .preview-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; font-size: 12px; color: var(--dim); }
 
-  .row { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; background: var(--surface); border: 1px solid var(--border); margin-bottom: -1px; }
-  .row:first-of-type { border-radius: var(--radius) var(--radius) 0 0; }
-  .row:last-of-type { border-radius: 0 0 var(--radius) var(--radius); margin-bottom: 0; }
-  .row:only-of-type { border-radius: var(--radius); }
-  .row label { font-size: 14px; }
-  .row .hint { font-size: 12px; color: var(--dim); margin-top: 2px; }
+  section.group { display: flex; flex-direction: column; gap: 10px; }
+  section.group > h2 { font-size: 11px; font-weight: 650; text-transform: uppercase; letter-spacing: 1px; color: var(--dim); }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  .card > * + * { border-top: 1px solid var(--border); }
+  .row { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 16px; padding: 12px 16px; transition: opacity 0.15s; }
+  .row.off { opacity: 0.45; }
+  .row-text { flex: 1 1 180px; min-width: 0; }
+  .row-text label, .row-text .label { font-size: 14px; display: block; }
+  .hint { font-size: 12px; color: var(--dim); margin-top: 2px; }
+  .controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+  .block { padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; }
 
-  input[type="color"] { width: 36px; height: 28px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); cursor: pointer; padding: 1px; }
-  input[type="range"] { width: 120px; accent-color: var(--accent); }
-  input[type="number"] { width: 80px; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 4px 8px; font-size: 14px; text-align: right; }
-  select { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 6px 10px; font-size: 13px; }
-  input[type="number"]:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+  input, select, textarea, button { font: inherit; color: inherit; }
+  input[type="color"] { width: 40px; height: 30px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); cursor: pointer; padding: 2px; }
+  input[type="range"] { width: 150px; max-width: 100%; accent-color: var(--accent); }
+  input[type="number"], input[type="text"], select, textarea { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 6px 8px; font-size: 13px; }
+  input[type="number"] { width: 84px; text-align: right; }
+  input[type="text"] { min-width: 0; }
+  textarea { width: 100%; min-height: 84px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  select { padding-right: 24px; max-width: 100%; }
+  :is(input, select, textarea, button):focus-visible { outline: none; box-shadow: var(--focus); }
+  :is(input, select, textarea, button):disabled { cursor: not-allowed; opacity: 0.6; }
+  .val { font-size: 12px; color: var(--dim); min-width: 44px; text-align: right; font-variant-numeric: tabular-nums; }
 
-  .toggle { position: relative; width: 42px; height: 24px; flex-shrink: 0; }
-  .toggle input { opacity: 0; width: 0; height: 0; }
-  .toggle .slider { position: absolute; inset: 0; background: var(--border); border-radius: 12px; cursor: pointer; transition: background 0.2s; }
+  .toggle { position: relative; width: 42px; height: 24px; flex-shrink: 0; display: inline-block; }
+  .toggle input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; z-index: 1; }
+  .toggle .slider { position: absolute; inset: 0; background: var(--border); border-radius: 12px; transition: background 0.2s; pointer-events: none; }
   .toggle .slider::before { content: ''; position: absolute; left: 3px; top: 3px; width: 18px; height: 18px; background: var(--text); border-radius: 50%; transition: transform 0.2s; }
   .toggle input:checked + .slider { background: var(--accent); }
-  .toggle input:checked + .slider::before { transform: translateX(18px); }
+  .toggle input:checked + .slider::before { transform: translateX(18px); background: #fff; }
+  .toggle input:focus-visible + .slider { box-shadow: var(--focus); }
 
-  .val { font-size: 13px; color: var(--dim); min-width: 32px; text-align: right; margin-left: 8px; }
-  .controls { display: flex; align-items: center; gap: 8px; }
+  .btn { padding: 8px 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: 13px; cursor: pointer; transition: border-color 0.15s, background 0.15s; white-space: nowrap; }
+  .btn:hover { border-color: var(--accent); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn.danger { border-color: var(--err); color: var(--err); }
+  .btn.small { padding: 5px 9px; font-size: 12px; }
+  .btn-row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .btn-row > .btn { flex: 1 1 auto; }
+  .inline-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .inline-form input[type="text"] { flex: 1 1 160px; }
+  .confirm { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 10px 12px; border: 1px solid var(--err); border-radius: 8px; font-size: 13px; }
+  .confirm span { flex: 1 1 200px; }
+  [hidden] { display: none !important; }
 
-  .presets { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
-  .preset { display: flex; flex-direction: column; padding: 0; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); cursor: pointer; color: var(--text); overflow: hidden; text-align: left; transition: border-color 0.15s, transform 0.15s; font: inherit; }
-  .preset:hover { border-color: var(--accent); transform: translateY(-1px); }
-  .preset.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
-  .preset .thumb { width: 100%; aspect-ratio: 16/9; background: #000 center/cover no-repeat; display: block; }
-  .preset .thumb.fallback { display: flex; align-items: center; justify-content: center; font-size: 11px; color: var(--dim); }
+  .tile-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+  .theme-tile { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; text-align: left; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); cursor: pointer; transition: border-color 0.15s; }
+  .theme-tile:hover { border-color: var(--accent); }
+  .theme-tile[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); background: var(--surface-2); }
+  .theme-tile .name { font-size: 13px; font-weight: 600; display: flex; justify-content: space-between; gap: 6px; }
+  .theme-tile .badge { font-size: 10px; font-weight: 500; color: var(--dim); text-transform: uppercase; letter-spacing: 0.5px; }
+  .theme-tile .desc { font-size: 11px; color: var(--dim); line-height: 1.35; }
+
+  .preset-wrap { position: relative; }
+  .preset { display: flex; flex-direction: column; width: 100%; height: 100%; padding: 0; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); cursor: pointer; overflow: hidden; text-align: left; transition: border-color 0.15s; }
+  .preset:hover { border-color: var(--accent); }
+  .preset.active { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+  .preset .thumb { width: 100%; aspect-ratio: 16/9; background: #000 center/cover no-repeat; display: flex; align-items: center; justify-content: center; font-size: 11px; }
   .preset .meta { padding: 8px 10px; }
   .preset .meta .name { font-size: 13px; font-weight: 600; margin-bottom: 2px; }
   .preset .meta .desc { font-size: 11px; color: var(--dim); line-height: 1.35; }
+  .preset-del { position: absolute; top: 6px; right: 6px; width: 26px; height: 26px; border-radius: 50%; border: 1px solid var(--border); background: var(--surface); color: var(--dim); cursor: pointer; font-size: 15px; line-height: 1; }
+  .preset-del:hover { color: var(--err); border-color: var(--err); }
 
-  .reset-btn { margin-top: 10px; width: 100%; padding: 10px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); color: var(--dim); font-size: 13px; cursor: pointer; text-align: center; transition: border-color 0.15s, color 0.15s; font: inherit; }
-  .reset-btn:hover { border-color: var(--accent); color: var(--text); }
+  .empty { padding: 16px; color: var(--dim); font-size: 13px; text-align: center; }
+  .warn { font-size: 12px; color: var(--warn); padding: 10px 16px; }
+  .check-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 6px 12px; }
+  .check-grid label { display: flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; }
+  .check-grid input { accent-color: var(--accent); width: 16px; height: 16px; }
+  .safe-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+  .safe-grid label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--dim); }
+  .safe-grid input { width: 100%; }
+  @media (max-width: 480px) { .safe-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 
-  .btn-row { display: flex; gap: 8px; margin-top: 10px; }
-  .btn-row button { flex: 1; padding: 10px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); color: var(--dim); font-size: 13px; cursor: pointer; transition: border-color 0.15s, color 0.15s; font: inherit; }
-  .btn-row button:hover { border-color: var(--accent); color: var(--text); }
+  .tag-row { display: flex; align-items: center; gap: 12px; padding: 8px 16px; }
+  .tag-name { font-size: 13px; flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .tag-count { font-size: 12px; color: var(--dim); min-width: 30px; text-align: right; }
+  .tag-remove { background: none; border: none; color: var(--dim); cursor: pointer; font-size: 16px; padding: 0 6px; border-radius: 4px; }
+  .tag-remove:hover { color: var(--err); }
+  .tag-remove.placeholder { visibility: hidden; }
 
-  body.light { --bg: #f4f4f6; --surface: #ffffff; --border: #d4d4dc; --text: #1a1a24; --dim: #6e6e80; }
-  body.light .preset .meta .desc { color: #8888a0; }
-  body.light .header-bar .subtitle { color: #6e6e80; }
-  body.light .conn-status.connected { color: #2a8c4a; }
-  body.light .conn-status.disconnected { color: #cc4444; }
-
-  .tag-list { display: flex; flex-direction: column; gap: 0; }
-  .tag-row { display: flex; align-items: center; padding: 10px 16px; background: var(--surface); border: 1px solid var(--border); margin-bottom: -1px; gap: 12px; }
-  .tag-row:first-child { border-radius: var(--radius) var(--radius) 0 0; }
-  .tag-row:last-child { border-radius: 0 0 var(--radius) var(--radius); margin-bottom: 0; }
-  .tag-row:only-child { border-radius: var(--radius); }
-  .tag-name { font-size: 13px; flex: 1; }
-  .tag-count { font-size: 12px; color: var(--dim); min-width: 30px; }
-  .tag-remove { background: none; border: none; color: var(--dim); cursor: pointer; font-size: 16px; padding: 0 4px; }
-  .tag-remove:hover { color: #ff6b6b; }
-  .tag-empty { padding: 16px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); color: var(--dim); font-size: 13px; text-align: center; }
-
-  .status { position: fixed; bottom: 16px; right: 16px; font-size: 12px; color: var(--dim); opacity: 0; transition: opacity 0.3s; }
+  .status { position: fixed; bottom: 16px; right: 16px; left: auto; max-width: calc(100% - 32px); font-size: 13px; padding: 8px 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; color: var(--dim); opacity: 0; pointer-events: none; transition: opacity 0.2s; z-index: 10; }
   .status.show { opacity: 1; }
-  .status.ok { color: #50c878; }
-  .status.err { color: #ff6b6b; }
+  .status.ok { color: var(--ok); }
+  .status.err { color: var(--err); border-color: var(--err); }
 </style>
 </head>
 <body>
+<div class="page">
 
-<h1>Wallpaper Settings</h1>
-<div class="header-bar">
-  <p class="subtitle">Changes apply to the wallpaper in ~2 seconds.</p>
-  <div style="display:flex;align-items:center;gap:12px">
-    <button id="themeToggle" style="background:none;border:1px solid var(--border);border-radius:4px;color:var(--dim);cursor:pointer;font-size:14px;padding:4px 8px;line-height:1" title="Toggle dark/light mode">&#9788;</button>
-    <span class="conn-status" id="connStatus"></span>
+<header class="top">
+  <div>
+    <h1>Wallpaper Settings</h1>
+    <p class="subtitle">Changes apply to the wallpaper and the preview instantly.</p>
   </div>
+  <div class="top-actions">
+    <span class="conn-status" id="connStatus" role="status"></span>
+    <button class="btn small" id="themeToggle" type="button" aria-label="Toggle dark/light page theme">&#9788;</button>
+  </div>
+</header>
+
+<div class="layout">
+  <aside class="preview-col" aria-label="Live preview">
+    <iframe class="preview-frame" src="/?preview=1" title="Live wallpaper preview" loading="eager"></iframe>
+    <div class="preview-bar">
+      <span>Live preview (the real wallpaper)</span>
+      <span class="btn-row">
+        <button class="btn small" id="exportPng" type="button">Export PNG</button>
+        <a id="exportLink" href="/?export=1" target="_blank" rel="noopener" hidden>Open export page</a>
+      </span>
+    </div>
+  </aside>
+
+  <main class="controls-col">
+
+    <section class="group" aria-labelledby="h-style">
+      <h2 id="h-style">Style</h2>
+      <div class="tile-grid" id="themeGrid" role="group" aria-labelledby="h-style"><div class="empty">Loading styles…</div></div>
+    </section>
+
+    <section class="group" aria-labelledby="h-presets">
+      <h2 id="h-presets">Presets</h2>
+      <div class="tile-grid" id="presets"><div class="empty">Loading presets…</div></div>
+      <div class="card"><div class="block">
+        <form class="inline-form" id="saveCustomForm">
+          <label for="customName" class="hint" style="margin:0">Save current as preset</label>
+          <input type="text" id="customName" maxlength="60" placeholder="Preset name" autocomplete="off">
+          <button class="btn" type="submit">Save preset</button>
+        </form>
+        <div class="btn-row">
+          <button class="btn" id="copyConfig" type="button">Copy JSON</button>
+          <button class="btn" id="pasteConfig" type="button">Paste JSON</button>
+          <button class="btn" id="resetDefaults" type="button">Reset to defaults</button>
+        </div>
+        <div id="pastePanel" hidden>
+          <label for="pasteText" class="hint">Clipboard access is unavailable — paste the JSON here:</label>
+          <textarea id="pasteText" spellcheck="false"></textarea>
+          <div class="btn-row" style="margin-top:8px">
+            <button class="btn primary" id="pasteApply" type="button">Apply JSON</button>
+            <button class="btn" id="pasteCancel" type="button">Cancel</button>
+          </div>
+        </div>
+        <div class="confirm" id="resetConfirm" hidden role="alertdialog" aria-labelledby="resetMsg">
+          <span id="resetMsg">Reset everything? Tag colours will be cleared</span>
+          <button class="btn danger" id="resetYes" type="button">Confirm</button>
+          <button class="btn" id="resetNo" type="button">Cancel</button>
+        </div>
+      </div></div>
+    </section>
+
+    <section class="group" aria-labelledby="h-comp">
+      <h2 id="h-comp">Composition</h2>
+      <div class="card">
+        <div data-fields="composition"></div>
+        <div class="block">
+          <div class="label" id="safeLabel">Safe area <span class="hint">(px kept clear of menu bars, docks and icons)</span></div>
+          <div class="btn-row" role="group" aria-labelledby="safeLabel">
+            <button class="btn small" type="button" data-safe="0,0,0,0">None</button>
+            <button class="btn small" type="button" data-safe="30,0,90,0">macOS</button>
+            <button class="btn small" type="button" data-safe="30,130,90,0">macOS + desktop icons</button>
+            <button class="btn small" type="button" data-safe="0,0,52,0">Windows taskbar</button>
+          </div>
+          <div class="safe-grid">
+            <label for="safe-top">Top<input type="number" id="safe-top" min="0" max="1000" step="1" data-side="top"></label>
+            <label for="safe-right">Right<input type="number" id="safe-right" min="0" max="1000" step="1" data-side="right"></label>
+            <label for="safe-bottom">Bottom<input type="number" id="safe-bottom" min="0" max="1000" step="1" data-side="bottom"></label>
+            <label for="safe-left">Left<input type="number" id="safe-left" min="0" max="1000" step="1" data-side="left"></label>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="group" aria-labelledby="h-colour">
+      <h2 id="h-colour">Colour</h2>
+      <div class="card">
+        <div data-fields="colour"></div>
+        <div class="warn" id="contrastWarn" role="status" hidden></div>
+      </div>
+    </section>
+
+    <section class="group" aria-labelledby="h-tags">
+      <h2 id="h-tags">Tag colours</h2>
+      <div class="card" id="tagList"><div class="empty">Loading tags…</div></div>
+    </section>
+
+    <section class="group" aria-labelledby="h-nodes">
+      <h2 id="h-nodes">Nodes &amp; edges</h2>
+      <div class="card" data-fields="nodes"></div>
+    </section>
+
+    <section class="group" aria-labelledby="h-motion">
+      <h2 id="h-motion">Motion &amp; effects</h2>
+      <div class="card" data-fields="motion"></div>
+    </section>
+
+    <section class="group" aria-labelledby="h-labels">
+      <h2 id="h-labels">Labels</h2>
+      <div class="card" data-fields="labels"></div>
+    </section>
+
+    <section class="group" aria-labelledby="h-overlay">
+      <h2 id="h-overlay">Overlay &amp; focus</h2>
+      <div class="card" data-fields="overlay"></div>
+    </section>
+
+    <section class="group" aria-labelledby="h-rotate">
+      <h2 id="h-rotate">Rotation</h2>
+      <div class="card">
+        <div class="block">
+          <div class="label" id="rotateLabel">Cycle through these styles <span class="hint">(none ticked = rotation off)</span></div>
+          <div class="check-grid" id="rotateThemes" role="group" aria-labelledby="rotateLabel"></div>
+        </div>
+        <div data-fields="rotation"></div>
+      </div>
+    </section>
+
+    <section class="group" aria-labelledby="h-vault">
+      <h2 id="h-vault">Vault</h2>
+      <div class="card">
+        <div class="block">
+          <label for="ignorePaths">Ignored paths</label>
+          <div class="hint" id="ignorePaths-hint">One folder or file path per line, relative to the vault. Saved when you leave the box.</div>
+          <textarea id="ignorePaths" spellcheck="false" aria-describedby="ignorePaths-hint" placeholder=".obsidian&#10;templates"></textarea>
+        </div>
+        <div data-fields="vault"></div>
+      </div>
+    </section>
+
+    <section class="group" aria-labelledby="h-perf">
+      <h2 id="h-perf">Performance</h2>
+      <div class="card" data-fields="performance"></div>
+    </section>
+
+    <section class="group" aria-labelledby="h-adv">
+      <h2 id="h-adv">Advanced</h2>
+      <div class="card" data-fields="advanced"></div>
+    </section>
+
+  </main>
+</div>
 </div>
 
-<div class="section">
-  <div class="section-title">Presets</div>
-  <div class="presets" id="presets"></div>
-  <button class="reset-btn" id="resetDefaults">Reset to defaults</button>
-  <div class="btn-row">
-    <button id="copyConfig">Copy JSON</button>
-    <button id="pasteConfig">Paste JSON</button>
-    <button id="saveCustom">Save Custom</button>
-  </div>
-</div>
-
-<div class="section">
-  <div class="section-title">Colors</div>
-  <div class="row">
-    <div><label>Accent</label><div class="hint">Default node and edge color</div></div>
-    <input type="color" id="accent" value="#7c5cff">
-  </div>
-  <div class="row">
-    <div><label>Background</label></div>
-    <input type="color" id="background" value="#0a0a0f">
-  </div>
-  <div class="row">
-    <div><label>Auto light/dark</label><div class="hint">Switch to the light colors below when your OS is in light mode</div></div>
-    <label class="toggle"><input type="checkbox" id="autoTheme"><span class="slider"></span></label>
-  </div>
-  <div class="row">
-    <div><label>Light accent</label><div class="hint">Used when Auto light/dark is on</div></div>
-    <input type="color" id="lightAccent" value="#39407a">
-  </div>
-  <div class="row">
-    <div><label>Light background</label></div>
-    <input type="color" id="lightBackground" value="#ece6d6">
-  </div>
-</div>
-
-<div class="section">
-  <div class="section-title">Nodes</div>
-  <div class="row">
-    <div><label>Node glow</label><div class="hint">Radial halo around each node</div></div>
-    <label class="toggle"><input type="checkbox" id="nodeGlow" checked><span class="slider"></span></label>
-  </div>
-  <div class="row">
-    <div><label>Glow intensity</label></div>
-    <div class="controls">
-      <input type="range" id="glowIntensity" min="0" max="100" value="100">
-      <span class="val" id="glowIntensityVal">1.00</span>
-    </div>
-  </div>
-  <div class="row">
-    <div><label>Edge style</label></div>
-    <div class="controls">
-      <select id="edgeStyle">
-        <option value="line">Line</option>
-        <option value="curve">Curve</option>
-        <option value="none">None</option>
-      </select>
-    </div>
-  </div>
-  <div class="row">
-    <div><label>Color mode</label><div class="hint">Age mode: fresh = green, 1+ year old = red.</div></div>
-    <div class="controls">
-      <select id="nodeColorMode">
-        <option value="tag">By tag</option>
-        <option value="age">By age</option>
-        <option value="folder">By folder</option>
-      </select>
-    </div>
-  </div>
-  <div class="row">
-    <div><label>Label font</label><div class="hint">Font family for hub labels</div></div>
-    <div class="controls">
-      <select id="labelFont">
-        <option value="sans">Sans</option>
-        <option value="mono">Mono</option>
-        <option value="serif">Serif</option>
-      </select>
-    </div>
-  </div>
-  <div class="row">
-    <div><label>Edge coloring</label><div class="hint">Edges inherit their source node's tag color</div></div>
-    <label class="toggle"><input type="checkbox" id="edgeColoring" checked><span class="slider"></span></label>
-  </div>
-  <div class="row">
-    <div><label>Link opacity</label></div>
-    <div class="controls">
-      <input type="range" id="linkOpacity" min="0" max="100" value="18">
-      <span class="val" id="linkOpacityVal">0.18</span>
-    </div>
-  </div>
-  <div class="row">
-    <div><label>Unresolved links</label><div class="hint">Show ghost nodes for [[links]] to notes that don't exist yet</div></div>
-    <label class="toggle"><input type="checkbox" id="showUnresolvedLinks" checked><span class="slider"></span></label>
-  </div>
-  <div class="row">
-    <div><label>Cluster by tag</label><div class="hint">Same-tag nodes gravitate together</div></div>
-    <label class="toggle"><input type="checkbox" id="clusterByTag" checked><span class="slider"></span></label>
-  </div>
-  <div class="row">
-    <div><label>Cluster halos</label><div class="hint">Soft color clouds behind tag groups</div></div>
-    <label class="toggle"><input type="checkbox" id="clusterHalos" checked><span class="slider"></span></label>
-  </div>
-</div>
-
-<div class="section">
-  <div class="section-title">Effects</div>
-  <div class="row">
-    <div><label>Motion mode</label><div class="hint">Ambient movement intensity</div></div>
-    <div class="controls">
-      <select id="motionMode">
-        <option value="still">Still</option>
-        <option value="light">Light</option>
-        <option value="balanced">Balanced</option>
-        <option value="showcase">Showcase</option>
-      </select>
-    </div>
-  </div>
-  <div class="row">
-    <div><label>Particles</label><div class="hint">Dots flowing along edges</div></div>
-    <label class="toggle"><input type="checkbox" id="particles" checked><span class="slider"></span></label>
-  </div>
-  <div class="row">
-    <div><label>Particle speed</label></div>
-    <div class="controls">
-      <input type="range" id="particleSpeed" min="10" max="300" value="100">
-      <span class="val" id="particleSpeedVal">1.0</span>
-    </div>
-  </div>
-  <div class="row">
-    <div><label>Particle density</label></div>
-    <div class="controls">
-      <input type="range" id="particleDensity" min="5" max="100" value="30">
-      <span class="val" id="particleDensityVal">0.30</span>
-    </div>
-  </div>
-  <div class="row">
-    <div><label>Background gradient</label><div class="hint">Subtle radial vignette with accent tint</div></div>
-    <label class="toggle"><input type="checkbox" id="backgroundGradient" checked><span class="slider"></span></label>
-  </div>
-  <div class="row">
-    <div><label>Depth of field</label><div class="hint">Peripheral nodes dimmer and smaller</div></div>
-    <label class="toggle"><input type="checkbox" id="depthOfField" checked><span class="slider"></span></label>
-  </div>
-  <div class="row">
-    <div><label>New note flare</label><div class="hint">Flash when a new note appears</div></div>
-    <label class="toggle"><input type="checkbox" id="noteFlare" checked><span class="slider"></span></label>
-  </div>
-</div>
-
-<div class="section">
-  <div class="section-title">Labels</div>
-  <div class="row">
-    <div><label>Hub labels</label><div class="hint">Show names on top connected notes</div></div>
-    <label class="toggle"><input type="checkbox" id="hubLabels"><span class="slider"></span></label>
-  </div>
-  <div class="row">
-    <div><label>Label count</label><div class="hint">How many hub names to show</div></div>
-    <div class="controls">
-      <input type="number" id="hubLabelCount" min="1" max="50" value="5">
-    </div>
-  </div>
-  <div class="row">
-    <div><label>Label threshold</label><div class="hint">Hide labels on less-important notes</div></div>
-    <div class="controls">
-      <input type="range" id="labelMinImportance" min="0" max="100" value="22">
-      <span class="val" id="labelMinImportanceVal">0.22</span>
-    </div>
-  </div>
-</div>
-
-<div class="section">
-  <div class="section-title">Performance</div>
-  <div class="row">
-    <div><label>Auto-scale large vaults</label><div class="hint">Reduce particles, labels, and edge density on dense graphs</div></div>
-    <label class="toggle"><input type="checkbox" id="autoScaleLargeVaults" checked><span class="slider"></span></label>
-  </div>
-  <div class="row">
-    <div><label>Max rendered nodes</label><div class="hint">Cap on drawn nodes; excess hidden by lowest importance (lower = faster)</div></div>
-    <div class="controls">
-      <input type="number" id="maxRenderedNodes" min="100" max="100000" step="100" value="5000">
-    </div>
-  </div>
-  <div class="row">
-    <div><label>Refresh interval</label><div class="hint">Polling fallback interval — live updates via SSE are instant when available</div></div>
-    <div class="controls">
-      <input type="number" id="refreshMs" min="1000" max="60000" step="1000" value="5000">
-      <span class="val">ms</span>
-    </div>
-  </div>
-</div>
-
-<div class="section">
-  <div class="section-title">Tag Colors</div>
-  <div id="tagList"></div>
-</div>
-
-<div class="status" id="status"></div>
+<div class="status" id="status" role="status" aria-live="polite"></div>
 
 <script>
+'use strict';
 const API = window.location.origin;
-let cfg = {};
+let cfg = {};          // last good config from the server
 let allTags = {};
-let PRESETS = [];
-let presetsListenerActive = false;
+let THEMES = [];
+let BUILTIN = [];
+let CUSTOM = [];
+let tagSignature = null;
+
+const $ = id => document.getElementById(id);
 
 function escapeHtml(str) {
   return String(str)
@@ -312,359 +306,665 @@ function escapeHtml(str) {
     .replace(/'/g, '&#39;');
 }
 
-function applyForm() {
-  document.getElementById('accent').value = cfg.accent ?? '#7c5cff';
-  document.getElementById('background').value = cfg.background ?? '#0a0a0f';
-  document.getElementById('nodeGlow').checked = cfg.nodeGlow !== false;
-  document.getElementById('glowIntensity').value = Math.round((cfg.glowIntensity ?? 1) * 100);
-  document.getElementById('glowIntensityVal').textContent = (cfg.glowIntensity ?? 1).toFixed(2);
-  document.getElementById('edgeStyle').value = cfg.edgeStyle ?? 'line';
-  document.getElementById('nodeColorMode').value = cfg.nodeColorMode ?? 'tag';
-  document.getElementById('labelFont').value = cfg.labelFont ?? 'sans';
-  document.getElementById('autoTheme').checked = cfg.autoTheme === true;
-  document.getElementById('lightAccent').value = cfg.lightAccent ?? '#39407a';
-  document.getElementById('lightBackground').value = cfg.lightBackground ?? '#ece6d6';
-  document.getElementById('edgeColoring').checked = cfg.edgeColoring !== false;
-  document.getElementById('showUnresolvedLinks').checked = cfg.showUnresolvedLinks !== false;
-  document.getElementById('clusterByTag').checked = cfg.clusterByTag !== false;
-  document.getElementById('clusterHalos').checked = cfg.clusterHalos !== false;
-  document.getElementById('linkOpacity').value = Math.round((cfg.linkOpacity ?? 0.18) * 100);
-  document.getElementById('linkOpacityVal').textContent = (cfg.linkOpacity ?? 0.18).toFixed(2);
-  document.getElementById('motionMode').value = cfg.motionMode ?? 'balanced';
-  document.getElementById('particles').checked = cfg.particles !== false;
-  document.getElementById('particleSpeed').value = Math.round((cfg.particleSpeed ?? 1) * 100);
-  document.getElementById('particleSpeedVal').textContent = (cfg.particleSpeed ?? 1).toFixed(1);
-  document.getElementById('particleDensity').value = Math.round((cfg.particleDensity ?? 0.3) * 100);
-  document.getElementById('particleDensityVal').textContent = (cfg.particleDensity ?? 0.3).toFixed(2);
-  document.getElementById('backgroundGradient').checked = cfg.backgroundGradient !== false;
-  document.getElementById('depthOfField').checked = cfg.depthOfField !== false;
-  document.getElementById('noteFlare').checked = cfg.noteFlare !== false;
-  document.getElementById('hubLabels').checked = cfg.hubLabels === true;
-  document.getElementById('hubLabelCount').value = cfg.hubLabelCount ?? 5;
-  document.getElementById('labelMinImportance').value = Math.round((cfg.labelMinImportance ?? 0.22) * 100);
-  document.getElementById('labelMinImportanceVal').textContent = (cfg.labelMinImportance ?? 0.22).toFixed(2);
-  document.getElementById('autoScaleLargeVaults').checked = cfg.autoScaleLargeVaults !== false;
-  document.getElementById('maxRenderedNodes').value = cfg.maxRenderedNodes ?? 5000;
-  document.getElementById('refreshMs').value = cfg.refreshMs ?? 5000;
+// ---------- field schema ----------
+const opts = list => list.map(v => Array.isArray(v) ? v : [v, v.charAt(0).toUpperCase() + v.slice(1)]);
+const GROUPS = {
+  composition: [
+    { k: 'layout', t: 'select', label: 'Layout', hint: 'How notes are arranged', opts: opts(['force', 'rings', 'timeline', 'galaxy']) },
+    { k: 'framing', t: 'select', label: 'Framing', hint: 'Where the graph sits on screen', opts: opts(['center', 'fill', 'left', 'right', 'none']) },
+    { k: 'zoom', t: 'range', label: 'Zoom', min: 0.4, max: 3, step: 0.05 },
+    { k: 'offsetX', t: 'range', label: 'Horizontal offset', min: -1, max: 1, step: 0.01 },
+    { k: 'offsetY', t: 'range', label: 'Vertical offset', min: -1, max: 1, step: 0.01 }
+  ],
+  colour: [
+    { k: 'accent', t: 'color', label: 'Accent', hint: 'Default node and edge colour' },
+    { k: 'background', t: 'color', label: 'Background' },
+    { k: 'palette', t: 'select', label: 'Palette', hint: 'Colours assigned to tags/folders', opts: opts(['auto', 'aurora', 'riso', 'metro', 'pastel', 'earth', 'neon', 'viridis', 'mono']) },
+    { k: 'nodeColorMode', t: 'select', label: 'Colour nodes by', hint: 'Age: fresh = green, 1+ year = red', opts: [['tag', 'Tag'], ['age', 'Age'], ['folder', 'Folder'], ['recency', 'Recency']] },
+    { k: 'recencyDays', t: 'int', label: 'Recency window (days)', hint: 'Notes older than this are dimmed', min: 1, max: 365, dep: c => c.nodeColorMode === 'recency', hard: true },
+    { k: 'autoTheme', t: 'toggle', label: 'Auto light/dark', hint: 'Use the light colours when the OS is in light mode' },
+    { k: 'timeOfDay', t: 'select', label: 'Time of day', hint: 'Tint: shift toward night/dawn/dusk by clock. Palette: light colours 07–19.', opts: [['off', 'Off'], ['tint', 'Tint'], ['palette', 'Palette']] },
+    { k: 'lightAccent', t: 'color', label: 'Light accent', dep: c => c.autoTheme || c.timeOfDay === 'palette' },
+    { k: 'lightBackground', t: 'color', label: 'Light background', dep: c => c.autoTheme || c.timeOfDay === 'palette' }
+  ],
+  nodes: [
+    { k: 'nodeGlow', t: 'toggle', label: 'Node glow', hint: 'Radial halo around each node' },
+    { k: 'glowIntensity', t: 'range', label: 'Glow intensity', min: 0, max: 1, step: 0.01, dep: c => c.nodeGlow },
+    { k: 'tagShapes', t: 'toggle', label: 'Tag shapes', hint: 'Circle / square / triangle / diamond per tag' },
+    { k: 'edgeStyle', t: 'select', label: 'Edge style', opts: opts(['line', 'curve', 'none']) },
+    { k: 'edgeColoring', t: 'toggle', label: 'Edge colouring', hint: "Edges inherit their source node's colour", dep: c => c.edgeStyle !== 'none' },
+    { k: 'linkOpacity', t: 'range', label: 'Link opacity', min: 0, max: 1, step: 0.01, dep: c => c.edgeStyle !== 'none' },
+    { k: 'clusterByTag', t: 'toggle', label: 'Cluster by tag', hint: 'Same-tag nodes gravitate together' },
+    { k: 'clusterHalos', t: 'toggle', label: 'Cluster halos', hint: 'Soft colour clouds behind tag groups' }
+  ],
+  motion: [
+    { k: 'motionMode', t: 'select', label: 'Motion mode', hint: 'Ambient movement intensity', opts: opts(['still', 'light', 'balanced', 'showcase']) },
+    { k: 'particles', t: 'toggle', label: 'Edge particles', hint: 'Dots flowing along edges' },
+    { k: 'particleSpeed', t: 'range', label: 'Particle speed', min: 0.1, max: 3, step: 0.1, dep: c => c.particles },
+    { k: 'particleDensity', t: 'range', label: 'Particle density', min: 0.05, max: 1, step: 0.01, dep: c => c.particles },
+    { k: 'ambientParticles', t: 'toggle', label: 'Ambient particles', hint: 'Floating dust in the background' },
+    { k: 'ambientParticleCount', t: 'range', label: 'Ambient count', min: 0, max: 300, step: 1, dep: c => c.ambientParticles },
+    { k: 'ambientParticleSpeed', t: 'range', label: 'Ambient speed', min: 0.05, max: 2, step: 0.05, dep: c => c.ambientParticles },
+    { k: 'ambientParticleSize', t: 'range', label: 'Ambient size', min: 0.5, max: 4, step: 0.1, dep: c => c.ambientParticles },
+    { k: 'glowBreathing', t: 'toggle', label: 'Glow breathing', hint: 'Glow slowly pulses' },
+    { k: 'glowBreathingSpeed', t: 'range', label: 'Breathing speed', min: 0.1, max: 3, step: 0.1, dep: c => c.glowBreathing },
+    { k: 'glowBreathingDepth', t: 'range', label: 'Breathing depth', min: 0, max: 0.4, step: 0.01, dep: c => c.glowBreathing },
+    { k: 'chromaticBloom', t: 'toggle', label: 'Chromatic bloom', hint: 'Colour-fringed glow on bright nodes' },
+    { k: 'chromaticBloomIntensity', t: 'range', label: 'Bloom intensity', min: 0, max: 1, step: 0.01, dep: c => c.chromaticBloom },
+    { k: 'depthParallax', t: 'toggle', label: 'Depth parallax', hint: 'Layers drift at different speeds' },
+    { k: 'depthParallaxStrength', t: 'range', label: 'Parallax strength', min: 0, max: 1, step: 0.01, dep: c => c.depthParallax },
+    { k: 'depthParallaxLayers', t: 'range', label: 'Parallax layers', min: 2, max: 4, step: 1, dep: c => c.depthParallax },
+    { k: 'depthOfField', t: 'toggle', label: 'Depth of field', hint: 'Peripheral nodes dimmer and smaller' },
+    { k: 'noteFlare', t: 'toggle', label: 'New note flare', hint: 'Flash when a new note appears' },
+    { k: 'backgroundGradient', t: 'toggle', label: 'Background gradient', hint: 'Subtle radial gradient with accent tint' },
+    { k: 'grain', t: 'toggle', label: 'Film grain' },
+    { k: 'vignette', t: 'toggle', label: 'Vignette', hint: 'Darken the screen edges' }
+  ],
+  labels: [
+    { k: 'hubLabels', t: 'toggle', label: 'Show labels', hint: 'Note names on the graph' },
+    { k: 'labelSource', t: 'select', label: 'Label which notes', opts: [['hubs', 'Most connected'], ['recent', 'Most recent']], dep: c => c.hubLabels },
+    { k: 'hubLabelCount', t: 'int', label: 'Label count', min: 1, max: 50, dep: c => c.hubLabels },
+    { k: 'labelMinImportance', t: 'range', label: 'Label threshold', hint: 'Hide labels on less-important notes', min: 0, max: 1, step: 0.01, dep: c => c.hubLabels },
+    { k: 'labelFont', t: 'select', label: 'Label font', opts: opts(['sans', 'mono', 'serif']), dep: c => c.hubLabels },
+    { k: 'labelStyle.mode', t: 'select', label: 'Label style', hint: 'Theme default lets the style decide', opts: [['', 'Theme default'], ['badge', 'Badge'], ['glow', 'Glow'], ['minimal', 'Minimal'], ['inherit', 'Inherit']], dep: c => c.hubLabels },
+    { k: 'labelStyle.backgroundAlpha', t: 'range', label: 'Label background opacity', min: 0, max: 0.9, step: 0.05, unsetText: 'default', unsetValue: 0.5, dep: c => c.hubLabels },
+    { k: 'labelStyle.glowColor', t: 'glowColor', label: 'Label glow colour', dep: c => c.hubLabels },
+    { k: 'labelStyle.chromaticSplit', t: 'toggle', label: 'Chromatic split labels', hint: 'RGB-offset text effect', dep: c => c.hubLabels }
+  ],
+  overlay: [
+    { k: 'overlay', t: 'select', label: 'Overlay', hint: 'Note: shows a different note each hour', opts: [['none', 'None'], ['clock', 'Clock'], ['stats', 'Vault stats'], ['note', 'Note of the hour']] },
+    { k: 'focusNote', t: 'text', label: 'Focus note', hint: 'Highlight a note and its neighbours. Empty = off.', placeholder: 'today, or a note name', maxlength: 300 },
+    { k: 'focusHops', t: 'range', label: 'Focus distance (hops)', min: 1, max: 4, step: 1, dep: c => !!c.focusNote }
+  ],
+  rotation: [
+    { k: 'rotate.everyMinutes', t: 'int', label: 'Switch every (minutes)', min: 1, max: 1440, dep: c => !!(c.rotate && c.rotate.themes && c.rotate.themes.length) }
+  ],
+  vault: [
+    { k: 'showUnresolvedLinks', t: 'toggle', label: 'Unresolved links', hint: "Ghost nodes for [[links]] to notes that don't exist yet" }
+  ],
+  performance: [
+    { k: 'renderer', t: 'select', label: 'Renderer', hint: 'Auto picks WebGL when available', opts: [['auto', 'Auto'], ['canvas', 'Canvas 2D'], ['webgl', 'WebGL']] },
+    { k: 'maxFps', t: 'range', label: 'Max FPS', min: 0, max: 60, step: 1, fmt: v => v === 0 ? 'only on change' : String(v) },
+    { k: 'idleFps', t: 'range', label: 'Idle FPS', hint: 'Frame rate when nothing is happening', min: 0, max: 30, step: 1, fmt: v => v === 0 ? 'hold frame' : String(v) },
+    { k: 'autoScaleLargeVaults', t: 'toggle', label: 'Auto-scale large vaults', hint: 'Reduce particles, labels and edge density on dense graphs' },
+    { k: 'maxRenderedNodes', t: 'int', label: 'Max rendered nodes', hint: 'Excess hidden by lowest importance (lower = faster)', min: 100, max: 100000, step: 100 },
+    { k: 'fastHash', t: 'toggle', label: 'Fast change detection', hint: 'Hash file metadata instead of contents' }
+  ],
+  advanced: [
+    { k: 'refreshMs', t: 'int', label: 'Refresh interval (ms)', hint: 'Polling fallback; only matters when live updates (SSE) are unavailable', min: 1000, max: 60000, step: 1000 }
+  ]
+};
+const FIELDS = [].concat(...Object.values(GROUPS));
+
+const fid = k => 'f-' + k.replace(/\./g, '-');
+const decimals = step => { const s = String(step); return s.includes('.') ? s.split('.')[1].length : 0; };
+function getPath(obj, k) {
+  return k.split('.').reduce((o, p) => (o && typeof o === 'object') ? o[p] : undefined, obj);
+}
+// Nested objects are re-sent whole; labelStyle.fontStyle is never written (labelFont is the font control).
+function cleanNested(top, obj) {
+  const o = { ...(obj || {}) };
+  if (top === 'labelStyle') delete o.fontStyle;
+  return o;
+}
+function patchFor(k, v) {
+  const parts = k.split('.');
+  if (parts.length === 1) return { [k]: v };
+  const top = parts[0];
+  const o = cleanNested(top, cfg[top]);
+  if (v === undefined || v === '') delete o[parts[1]]; else o[parts[1]] = v;
+  return { [top]: o };
 }
 
-function setConnStatus(connected) {
-  const el = document.getElementById('connStatus');
-  el.textContent = connected ? '● Connected' : '○ Disconnected';
-  el.className = 'conn-status ' + (connected ? 'connected' : 'disconnected');
+function fmtVal(f, v) {
+  if (v === undefined || v === null) return f.unsetText || '';
+  if (f.fmt) return f.fmt(v);
+  return Number(v).toFixed(decimals(f.step));
 }
 
-function status(msg, type) {
-  const el = document.getElementById('status');
-  el.textContent = msg;
-  el.className = 'status show ' + (type || '');
-  clearTimeout(el._t);
-  el._t = setTimeout(() => el.className = 'status', 2000);
+function rowHtml(f) {
+  const id = fid(f.k);
+  const hintId = id + '-hint';
+  const hint = f.hint ? `<div class="hint" id="${hintId}">${escapeHtml(f.hint)}</div>` : '';
+  const desc = f.hint ? ` aria-describedby="${hintId}"` : '';
+  let ctl = '';
+  switch (f.t) {
+    case 'toggle':
+      ctl = `<span class="toggle"><input type="checkbox" id="${id}"${desc}><span class="slider" aria-hidden="true"></span></span>`;
+      break;
+    case 'range':
+      ctl = `<input type="range" id="${id}" min="${f.min}" max="${f.max}" step="${f.step}"${desc}><output class="val" id="${id}-val" for="${id}"></output>`;
+      break;
+    case 'int':
+      ctl = `<input type="number" id="${id}" min="${f.min}" max="${f.max}" step="${f.step || 1}" inputmode="numeric"${desc}>`;
+      break;
+    case 'select':
+      ctl = `<select id="${id}"${desc}>${f.opts.map(([v, l]) => `<option value="${escapeHtml(v)}">${escapeHtml(l)}</option>`).join('')}</select>`;
+      break;
+    case 'color':
+      ctl = `<input type="color" id="${id}"${desc}>`;
+      break;
+    case 'text':
+      ctl = `<input type="text" id="${id}" maxlength="${f.maxlength || 300}" placeholder="${escapeHtml(f.placeholder || '')}" autocomplete="off"${desc}>`;
+      break;
+    case 'glowColor':
+      ctl = `<select id="${id}"${desc}><option value="">Theme default</option><option value="accent">Accent</option><option value="node">Node colour</option><option value="custom">Custom</option></select>` +
+        `<input type="color" id="${id}-hex" aria-label="Custom label glow colour">`;
+      break;
+  }
+  return `<div class="row" id="${id}-row"><div class="row-text"><label for="${id}">${escapeHtml(f.label)}</label>${hint}</div><div class="controls">${ctl}</div></div>`;
 }
 
-function detectActivePreset() {
-  if (!PRESETS.length || !Object.keys(cfg).length) return;
-  const presetEls = document.querySelectorAll('.preset');
-  PRESETS.forEach((p, i) => {
-    const match = Object.entries(p.config).every(([k, v]) => {
-      const cfgVal = cfg[k];
-      if (k === 'tagColors') {
-        const pTc = v || {};
-        const cTc = cfgVal || {};
-        const pKeys = Object.keys(pTc);
-        const cKeys = Object.keys(cTc);
-        if (pKeys.length !== cKeys.length) return false;
-        return pKeys.every(tag => pTc[tag] === cTc[tag]);
-      }
-      if (typeof v === 'number' && typeof cfgVal === 'number') {
-        return Math.abs(v - cfgVal) < 0.001;
-      }
-      return cfgVal === v;
-    });
-    if (presetEls[i]) presetEls[i].classList.toggle('active', match);
+function buildFields() {
+  document.querySelectorAll('[data-fields]').forEach(el => {
+    el.innerHTML = (GROUPS[el.dataset.fields] || []).map(rowHtml).join('');
+  });
+  FIELDS.forEach(f => {
+    const el = $(fid(f.k));
+    if (f.t === 'range') {
+      el.addEventListener('input', () => { $(fid(f.k) + '-val').textContent = fmtVal(f, parseFloat(el.value)); });
+      el.addEventListener('change', () => {
+        const d = decimals(f.step);
+        let v = Math.min(f.max, Math.max(f.min, parseFloat(el.value)));
+        v = d === 0 ? Math.round(v) : Number(v.toFixed(d));
+        save(patchFor(f.k, v));
+      });
+    } else if (f.t === 'toggle') {
+      el.addEventListener('change', () => save(patchFor(f.k, el.checked)));
+    } else if (f.t === 'int') {
+      el.addEventListener('change', () => {
+        const n = parseInt(el.value, 10);
+        if (!Number.isFinite(n)) { status(`${f.label} must be a whole number`, 'err'); applyForm(true); return; }
+        const v = Math.min(f.max, Math.max(f.min, n));
+        el.value = v;
+        save(patchFor(f.k, v));
+      });
+    } else if (f.t === 'select' || f.t === 'color') {
+      el.addEventListener('change', () => save(patchFor(f.k, el.value)));
+    } else if (f.t === 'text') {
+      el.addEventListener('change', () => save(patchFor(f.k, el.value.trim())));
+    } else if (f.t === 'glowColor') {
+      const hex = $(fid(f.k) + '-hex');
+      el.addEventListener('change', () => {
+        hex.disabled = el.value !== 'custom';
+        save(patchFor(f.k, el.value === 'custom' ? hex.value : el.value));
+      });
+      hex.addEventListener('change', () => { el.value = 'custom'; save(patchFor(f.k, hex.value)); });
+    }
   });
 }
 
-async function loadConfig() {
-  try {
-    const r = await fetch(API + '/api/config');
-    if (!r.ok) throw new Error(`config load failed: ${r.status}`);
-    cfg = await r.json();
-    applyForm();
-    setConnStatus(true);
-    detectActivePreset();
-  } catch (e) {
-    status('Failed to load config', 'err');
-    setConnStatus(false);
-  }
+// Push cfg into every control. The focused control is left alone so an
+// SSE-triggered refresh never clobbers what the user is typing.
+function applyForm(force) {
+  const active = force ? null : document.activeElement;
+  FIELDS.forEach(f => {
+    const el = $(fid(f.k));
+    if (!el) return;
+    const v = getPath(cfg, f.k);
+    const skip = el === active && (f.t === 'text' || f.t === 'int');
+    if (f.t === 'toggle') el.checked = v === true;
+    else if (f.t === 'range') {
+      const n = typeof v === 'number' ? v : (f.unsetValue !== undefined ? f.unsetValue : f.min);
+      el.value = n;
+      $(fid(f.k) + '-val').textContent = fmtVal(f, typeof v === 'number' ? v : undefined);
+    } else if (f.t === 'glowColor') {
+      const hex = $(fid(f.k) + '-hex');
+      const isHex = typeof v === 'string' && /^#[0-9a-fA-F]{6}$/.test(v);
+      el.value = isHex ? 'custom' : (v || '');
+      hex.value = isHex ? v.toLowerCase() : (cfg.accent || '#7c5cff');
+      hex.disabled = !isHex;
+    } else if (f.t === 'color') {
+      if (typeof v === 'string' && /^#[0-9a-fA-F]{6}$/.test(v)) el.value = v.toLowerCase();
+    } else if (!skip) el.value = v === undefined || v === null ? '' : v;
+    const row = $(fid(f.k) + '-row');
+    if (f.dep) {
+      const on = !!f.dep(cfg);
+      row.classList.toggle('off', !on);
+      if (f.hard) el.disabled = !on;
+    }
+  });
+  // Safe area
+  const sa = cfg.safeArea || {};
+  document.querySelectorAll('.safe-grid input').forEach(inp => {
+    if (inp !== active) inp.value = sa[inp.dataset.side] ?? 0;
+  });
+  // Ignore paths
+  const ip = $('ignorePaths');
+  if (ip !== active) ip.value = (cfg.ignorePaths || []).join('\n');
+  // Rotation themes
+  const rot = (cfg.rotate && cfg.rotate.themes) || [];
+  document.querySelectorAll('#rotateThemes input').forEach(cb => { cb.checked = rot.includes(cb.value); });
+  renderThemeSelection();
+  updateContrast();
+  detectActivePreset();
+  renderTags();
 }
 
-async function loadTags() {
-  try {
-    const r = await fetch(API + '/api/tags');
-    if (!r.ok) throw new Error(`tag load failed: ${r.status}`);
-    allTags = await r.json();
-    renderTags();
-  } catch (e) {}
+// ---------- status / connection ----------
+function setConnStatus(connected) {
+  const el = $('connStatus');
+  el.textContent = connected ? '● Connected' : '○ Disconnected';
+  el.className = 'conn-status ' + (connected ? 'connected' : 'disconnected');
+}
+function status(msg, type) {
+  const el = $('status');
+  el.textContent = msg;
+  el.className = 'status show ' + (type || '');
+  clearTimeout(el._t);
+  el._t = setTimeout(() => { el.className = 'status'; }, type === 'err' ? 5000 : 2000);
 }
 
+// ---------- save ----------
+let inflight = 0;
 async function save(updates) {
+  inflight++;
   try {
     const r = await fetch(API + '/api/config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(updates)
     });
-    const data = await r.json();
+    let data = {};
+    try { data = await r.json(); } catch (e) { /* non-JSON error body */ }
     if (!r.ok) throw new Error(data.error || `save failed: ${r.status}`);
-    cfg = { ...cfg, ...data };
+    cfg = data;
+    setConnStatus(true);
     status('Saved', 'ok');
-    detectActivePreset();  // add this line
+    applyForm(true);
     return true;
   } catch (e) {
     status(e.message || 'Save failed', 'err');
+    applyForm(true); // revert every control (even the focused one) to the last good config
     return false;
+  } finally {
+    inflight--;
   }
 }
 
+async function getJson(path) {
+  const r = await fetch(API + path);
+  if (!r.ok) throw new Error(`${path} failed: ${r.status}`);
+  return r.json();
+}
+
+async function loadConfig() {
+  try {
+    cfg = await getJson('/api/config');
+    setConnStatus(true);
+    applyForm();
+  } catch (e) {
+    status('Failed to load config', 'err');
+    setConnStatus(false);
+  }
+}
+
+// ---------- styles (themes) ----------
+function renderThemes() {
+  const grid = $('themeGrid');
+  if (!THEMES.length) { grid.innerHTML = '<div class="empty">No styles available.</div>'; }
+  else {
+    grid.innerHTML = THEMES.map(t => `<button type="button" class="theme-tile" data-theme="${escapeHtml(t.id)}" aria-pressed="false">
+      <span class="name">${escapeHtml(t.name || t.id)}<span class="badge">${t.dark === false ? 'light' : 'dark'}</span></span>
+      ${t.description ? `<span class="desc">${escapeHtml(t.description)}</span>` : ''}
+    </button>`).join('');
+  }
+  $('rotateThemes').innerHTML = THEMES.map(t => {
+    const id = 'rot-' + String(t.id).replace(/[^a-zA-Z0-9_-]/g, '_');
+    return `<label for="${id}"><input type="checkbox" id="${id}" value="${escapeHtml(t.id)}">${escapeHtml(t.name || t.id)}</label>`;
+  }).join('') || '<div class="empty">No styles available.</div>';
+  applyForm();
+}
+function renderThemeSelection() {
+  document.querySelectorAll('.theme-tile').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.theme === (cfg.theme || 'default'))));
+}
+$('themeGrid').addEventListener('click', e => {
+  const b = e.target.closest('.theme-tile');
+  if (b) save({ theme: b.dataset.theme });
+});
+$('rotateThemes').addEventListener('change', () => {
+  const themes = Array.from(document.querySelectorAll('#rotateThemes input:checked')).map(cb => cb.value);
+  const everyMinutes = (cfg.rotate && cfg.rotate.everyMinutes) || 60;
+  save({ rotate: { themes, everyMinutes } });
+});
+async function loadThemes() {
+  try { THEMES = await getJson('/api/themes'); } catch (e) { THEMES = []; status('Failed to load styles', 'err'); }
+  renderThemes();
+}
+
+// ---------- presets ----------
+function deepEqual(a, b) {
+  if (typeof a === 'number' && typeof b === 'number') return Math.abs(a - b) < 0.001;
+  if (a === b) return true;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => deepEqual(v, b[i]));
+  }
+  if (a && b && typeof a === 'object' && typeof b === 'object') {
+    const ka = Object.keys(a), kb = Object.keys(b);
+    return ka.length === kb.length && ka.every(k => Object.prototype.hasOwnProperty.call(b, k) && deepEqual(a[k], b[k]));
+  }
+  return false;
+}
+// Compare only the keys a preset defines; objects (labelStyle, safeArea, rotate) structurally.
+function presetPatch(p) {
+  const c = { ...(p.config || {}) };
+  delete c.tagColors;
+  return c;
+}
+function presetMatches(p) {
+  const c = presetPatch(p);
+  const keys = Object.keys(c);
+  if (!keys.length) return false;
+  return keys.every(k => {
+    if (k === 'labelStyle') return deepEqual(cleanNested('labelStyle', c[k]), cleanNested('labelStyle', cfg[k]));
+    return deepEqual(c[k], cfg[k]);
+  });
+}
+function allPresets() { return BUILTIN.concat(CUSTOM); }
+function detectActivePreset() {
+  if (!Object.keys(cfg).length) return;
+  document.querySelectorAll('#presets .preset').forEach(btn => {
+    const p = allPresets()[Number(btn.dataset.idx)];
+    const on = !!p && presetMatches(p);
+    btn.classList.toggle('active', on);
+    btn.setAttribute('aria-pressed', String(on));
+  });
+}
 function renderPresets() {
-  const el = document.getElementById('presets');
-  if (!PRESETS.length) {
-    el.innerHTML = '<div class="tag-empty">Loading themes…</div>';
+  const el = $('presets');
+  const list = allPresets();
+  if (!list.length) { el.innerHTML = '<div class="empty">No presets.</div>'; return; }
+  el.innerHTML = list.map((p, i) => {
+    const name = escapeHtml(p.name);
+    const bg = /^#[0-9a-fA-F]{6}$/.test(p.background || '') ? p.background : '#000000';
+    const ac = /^#[0-9a-fA-F]{6}$/.test(p.accent || '') ? p.accent : '#ffffff';
+    const thumb = p.thumbnail
+      ? `<span class="thumb" style="background-image:url('${escapeHtml(encodeURI(p.thumbnail).replace(/'/g, '%27'))}');background-color:${bg}"></span>`
+      : `<span class="thumb" style="background-color:${bg};color:${ac}">${name}</span>`;
+    const desc = p.description ? `<div class="desc">${escapeHtml(p.description)}</div>` : '';
+    const del = p.custom ? `<button type="button" class="preset-del" data-del="${name}" aria-label="Delete preset ${name}">&times;</button>` : '';
+    return `<div class="preset-wrap"><button type="button" class="preset" data-idx="${i}" aria-pressed="false">${thumb}<div class="meta"><div class="name">${name}</div>${desc}</div></button>${del}</div>`;
+  }).join('');
+  detectActivePreset();
+}
+$('presets').addEventListener('click', async e => {
+  const del = e.target.closest('.preset-del');
+  if (del) {
+    try {
+      const r = await fetch(API + '/api/custom-presets?name=' + encodeURIComponent(del.dataset.del), { method: 'DELETE' });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || 'delete failed');
+      CUSTOM = data;
+      renderPresets();
+      status('Preset deleted', 'ok');
+    } catch (err) { status(err.message || 'Delete failed', 'err'); }
     return;
   }
-  el.innerHTML = PRESETS.map(p => {
-    const safeName = escapeHtml(p.name);
-    const thumb = p.thumbnail
-      ? `<span class="thumb" style="background-image:url('${escapeHtml(p.thumbnail)}');background-color:${escapeHtml(p.background)}"></span>`
-      : `<span class="thumb fallback" style="background-color:${escapeHtml(p.background)};color:${escapeHtml(p.accent)}">${safeName}</span>`;
-    const desc = p.description ? `<div class="desc">${escapeHtml(p.description)}</div>` : '';
-    return `<button class="preset" data-name="${safeName}">
-      ${thumb}
-      <div class="meta"><div class="name">${safeName}</div>${desc}</div>
-    </button>`;
-  }).join('');
-  if (!presetsListenerActive) {
-    el.addEventListener('click', async e => {
-      const btn = e.target.closest('.preset');
-      if (!btn) return;
-      const preset = PRESETS.find(p => p.name === btn.dataset.name);
-      if (!preset) return;
-      if (await save(preset.config)) {
-        applyForm();
-        renderTags();
-        el.querySelectorAll('.preset').forEach(b => b.classList.toggle('active', b === btn));
-      }
-    });
-    presetsListenerActive = true;
+  const btn = e.target.closest('.preset');
+  if (!btn) return;
+  const p = allPresets()[Number(btn.dataset.idx)];
+  // Partial patch. tagColors is stripped defensively (older presets.json files
+  // carried it) so applying a preset never clears the user's tag colours.
+  if (p) save(presetPatch(p));
+});
+
+// Keys worth carrying in a preset: everything except vault-specific data.
+function presetConfigFrom(c) {
+  const out = {};
+  for (const [k, v] of Object.entries(c || {})) {
+    if (k === 'tagColors' || k === 'ignorePaths') continue;
+    out[k] = k === 'labelStyle' ? cleanNested(k, v) : v;
   }
+  return out;
+}
+async function postCustomPreset(name, config) {
+  const r = await fetch(API + '/api/custom-presets', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, config })
+  });
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.error || 'save failed');
+  return data;
+}
+$('saveCustomForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const input = $('customName');
+  const name = input.value.trim();
+  if (!name) { status('Give the preset a name', 'err'); input.focus(); return; }
+  try {
+    CUSTOM = await postCustomPreset(name, presetConfigFrom(cfg));
+    input.value = '';
+    renderPresets();
+    status('Saved preset: ' + name, 'ok');
+  } catch (err) { status(err.message || 'Save failed', 'err'); }
+});
+
+async function migrateLocalPresets(defaults) {
+  let stored = [];
+  try { stored = JSON.parse(localStorage.getItem('vaultwallpaper-custom') || '[]'); } catch (e) { return; }
+  if (!Array.isArray(stored) || !stored.length) return;
+  let ok = true;
+  for (const p of stored) {
+    try {
+      if (!p || !p.name) continue;
+      // Drop keys the server no longer knows so an old preset can't 400.
+      const config = {};
+      for (const [k, v] of Object.entries(presetConfigFrom(p.config))) if (k in defaults) config[k] = v;
+      CUSTOM = await postCustomPreset(String(p.name).slice(0, 60), config);
+    } catch (e) { ok = false; }
+  }
+  if (ok) { try { localStorage.removeItem('vaultwallpaper-custom'); } catch (e) { /* ignore */ } }
 }
 
 async function loadPresets() {
-  try {
-    const r = await fetch(API + '/presets.json');
-    if (!r.ok) throw new Error(`presets load failed: ${r.status}`);
-    PRESETS = await r.json();
-  } catch (e) {
-    PRESETS = [];
-    status('Failed to load presets', 'err');
-  }
-  try {
-    const custom = JSON.parse(localStorage.getItem('vaultwallpaper-custom') || '[]');
-    if (custom.length) PRESETS = [...PRESETS, ...custom];
-  } catch (e) {}
+  try { BUILTIN = await getJson('/presets.json'); } catch (e) { BUILTIN = []; status('Failed to load presets', 'err'); }
+  try { CUSTOM = await getJson('/api/custom-presets'); } catch (e) { CUSTOM = []; }
+  try { await migrateLocalPresets(await getJson('/api/defaults')); } catch (e) { /* ignore */ }
   renderPresets();
-  detectActivePreset();
 }
 
-function renderTags() {
-  const el = document.getElementById('tagList');
-  const tagColors = cfg.tagColors || {};
-  const sorted = Object.entries(allTags).sort((a, b) => {
-    const ac = tagColors[a[0]] ? 1 : 0;
-    const bc = tagColors[b[0]] ? 1 : 0;
-    if (ac !== bc) return bc - ac;
-    return b[1] - a[1];
-  });
+// ---------- copy / paste / reset ----------
+function exportableConfig() {
+  const c = { ...cfg };
+  if (c.labelStyle) c.labelStyle = cleanNested('labelStyle', c.labelStyle);
+  return c;
+}
+$('copyConfig').addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(JSON.stringify(exportableConfig(), null, 2));
+    status('Copied to clipboard', 'ok');
+  } catch (e) { status('Copy failed: ' + e.message, 'err'); }
+});
+async function applyJsonText(text) {
+  let parsed;
+  try { parsed = JSON.parse(text); } catch (e) { status('Paste failed: not valid JSON', 'err'); return false; }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) { status('Paste failed: expected a JSON object', 'err'); return false; }
+  return save(parsed);
+}
+$('pasteConfig').addEventListener('click', async () => {
+  if (navigator.clipboard && navigator.clipboard.readText) {
+    try { await applyJsonText(await navigator.clipboard.readText()); return; } catch (e) { /* fall through to textarea */ }
+  }
+  $('pastePanel').hidden = false;
+  $('pasteText').focus();
+});
+$('pasteApply').addEventListener('click', async () => {
+  if (await applyJsonText($('pasteText').value)) { $('pastePanel').hidden = true; $('pasteText').value = ''; }
+});
+$('pasteCancel').addEventListener('click', () => { $('pastePanel').hidden = true; $('pasteConfig').focus(); });
 
-  if (sorted.length === 0) {
-    el.innerHTML = '<div class="tag-empty">No tags found in vault.</div>';
+$('resetDefaults').addEventListener('click', () => { $('resetConfirm').hidden = false; $('resetNo').focus(); });
+$('resetNo').addEventListener('click', () => { $('resetConfirm').hidden = true; $('resetDefaults').focus(); });
+$('resetYes').addEventListener('click', async () => {
+  $('resetConfirm').hidden = true;
+  try {
+    const defaults = await getJson('/api/defaults'); // includes labelStyle: {} and tagColors: {}
+    if (await save(defaults)) status('Reset to defaults', 'ok');
+  } catch (e) { status(e.message || 'Reset failed', 'err'); }
+});
+
+// ---------- safe area / ignore paths ----------
+document.querySelectorAll('[data-safe]').forEach(b => b.addEventListener('click', () => {
+  const [top, right, bottom, left] = b.dataset.safe.split(',').map(Number);
+  save({ safeArea: { top, right, bottom, left } });
+}));
+document.querySelectorAll('.safe-grid input').forEach(inp => inp.addEventListener('change', () => {
+  const n = parseInt(inp.value, 10);
+  if (!Number.isFinite(n)) { status('Safe area must be a whole number of pixels', 'err'); applyForm(true); return; }
+  const sa = { top: 0, right: 0, bottom: 0, left: 0, ...(cfg.safeArea || {}) };
+  sa[inp.dataset.side] = Math.min(1000, Math.max(0, n));
+  save({ safeArea: sa });
+}));
+$('ignorePaths').addEventListener('change', e => {
+  const list = e.target.value.split('\n').map(s => s.trim()).filter(Boolean);
+  save({ ignorePaths: list });
+});
+
+// ---------- contrast ----------
+function luminance(hex) {
+  const m = /^#([0-9a-f]{6})$/i.exec(hex || '');
+  if (!m) return null;
+  const n = parseInt(m[1], 16);
+  const ch = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map(v => {
+    const s = v / 255;
+    return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+  });
+  return 0.2126 * ch[0] + 0.7152 * ch[1] + 0.0722 * ch[2];
+}
+function contrastRatio(a, b) {
+  const la = luminance(a), lb = luminance(b);
+  if (la === null || lb === null) return null;
+  return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+}
+function updateContrast() {
+  const warn = $('contrastWarn');
+  const acc = $(fid('accent')).value, bg = $(fid('background')).value;
+  const r = contrastRatio(acc, bg);
+  if (r !== null && r < 2) {
+    warn.textContent = `Low contrast: accent vs background is ${r.toFixed(2)}:1 (under 2:1). Nodes may be hard to see.`;
+    warn.hidden = false;
+  } else warn.hidden = true;
+}
+
+// ---------- tag colours ----------
+function sortedTags() {
+  const tc = cfg.tagColors || {};
+  return Object.entries(allTags).sort((a, b) => {
+    const ac = tc[a[0]] ? 1 : 0, bc = tc[b[0]] ? 1 : 0;
+    if (ac !== bc) return bc - ac;
+    return b[1] - a[1] || a[0].localeCompare(b[0]);
+  });
+}
+function findTagEl(cls, tag) {
+  return Array.from(document.querySelectorAll('#tagList .' + cls)).find(el => el.dataset.tag === tag) || null;
+}
+function renderTags() {
+  const el = $('tagList');
+  const tc = cfg.tagColors || {};
+  const sorted = sortedTags();
+  const sig = JSON.stringify(sorted.map(([t]) => [t, !!tc[t]]));
+  if (sig === tagSignature) {
+    // Same set of rows: update in place so keyboard focus is kept.
+    sorted.forEach(([tag, count]) => {
+      const inp = findTagEl('tag-color', tag);
+      if (inp && inp !== document.activeElement) inp.value = tc[tag] || cfg.accent || '#7c5cff';
+      const cnt = findTagEl('tag-count', tag);
+      if (cnt) cnt.textContent = count;
+    });
     return;
   }
-
-  el.innerHTML = '<div class="tag-list">' + sorted.map(([tag, count]) => {
-    const color = tagColors[tag] || '';
-    const safeTag = escapeHtml(tag);
+  const active = document.activeElement;
+  const focusTag = active && el.contains(active) ? { tag: active.dataset.tag, remove: active.classList.contains('tag-remove') } : null;
+  tagSignature = sig;
+  if (!sorted.length) { el.innerHTML = '<div class="empty">No tags found in vault.</div>'; return; }
+  el.innerHTML = sorted.map(([tag, count], i) => {
+    const color = tc[tag] || '';
+    const t = escapeHtml(tag);
+    const id = 'tag-' + i;
     return `<div class="tag-row">
-      <input type="color" value="${escapeHtml(color || cfg.accent || '#7c5cff')}" data-tag="${safeTag}" class="tag-color">
-      <span class="tag-name">${safeTag}</span>
-      <span class="tag-count">${count}</span>
-      ${color ? `<button class="tag-remove" data-tag="${safeTag}" title="Remove color">&times;</button>` : ''}
+      <input type="color" id="${id}" class="tag-color" data-tag="${t}" value="${escapeHtml(color || cfg.accent || '#7c5cff')}">
+      <label class="tag-name" for="${id}">#${t}${color ? '' : ' <span class="hint">(auto)</span>'}</label>
+      <span class="tag-count" data-tag="${t}" aria-label="${count} notes">${count}</span>
+      <button type="button" class="tag-remove${color ? '' : ' placeholder'}" data-tag="${t}" aria-label="Clear colour for ${t}"${color ? '' : ' tabindex="-1" aria-hidden="true"'}>&times;</button>
     </div>`;
-  }).join('') + '</div>';
-
-  el.querySelectorAll('.tag-color').forEach(input => {
-    input.addEventListener('change', async e => {
-      const tag = e.target.dataset.tag;
-      const tc = { ...(cfg.tagColors || {}), [tag]: e.target.value };
-      if (await save({ tagColors: tc })) renderTags();
-    });
-  });
-  el.querySelectorAll('.tag-remove').forEach(btn => {
-    btn.addEventListener('click', async e => {
-      const tag = e.target.dataset.tag;
-      const tc = { ...(cfg.tagColors || {}) };
-      delete tc[tag];
-      if (await save({ tagColors: tc })) renderTags();
-    });
-  });
+  }).join('');
+  if (focusTag && focusTag.tag !== undefined) {
+    const target = (focusTag.remove && findTagEl('tag-remove', focusTag.tag)) || findTagEl('tag-color', focusTag.tag);
+    if (target && !target.classList.contains('placeholder')) target.focus();
+    else { const c = findTagEl('tag-color', focusTag.tag); if (c) c.focus(); }
+  }
+}
+$('tagList').addEventListener('change', e => {
+  const inp = e.target.closest('.tag-color');
+  if (!inp) return;
+  save({ tagColors: { ...(cfg.tagColors || {}), [inp.dataset.tag]: inp.value } });
+});
+$('tagList').addEventListener('click', e => {
+  const btn = e.target.closest('.tag-remove');
+  if (!btn || btn.classList.contains('placeholder')) return;
+  const tc = { ...(cfg.tagColors || {}) };
+  delete tc[btn.dataset.tag];
+  save({ tagColors: tc });
+});
+async function loadTags() {
+  try { allTags = await getJson('/api/tags'); } catch (e) { allTags = {}; }
+  tagSignature = null;
+  renderTags();
 }
 
-// Colors
-document.getElementById('accent').addEventListener('change', e => save({ accent: e.target.value }));
-document.getElementById('background').addEventListener('change', e => save({ background: e.target.value }));
-
-// Colors (light theme)
-document.getElementById('lightAccent').addEventListener('change', e => save({ lightAccent: e.target.value }));
-document.getElementById('lightBackground').addEventListener('change', e => save({ lightBackground: e.target.value }));
-
-// Toggles
-['nodeGlow','edgeColoring','showUnresolvedLinks','clusterByTag','clusterHalos','particles','backgroundGradient','depthOfField','noteFlare','hubLabels','autoScaleLargeVaults','autoTheme'].forEach(id => {
-  document.getElementById(id).addEventListener('change', e => save({ [id]: e.target.checked }));
+// ---------- export ----------
+$('exportPng').addEventListener('click', () => {
+  const w = window.open('/?export=1', '_blank');
+  $('exportLink').hidden = !!w;
+  if (!w) status('Pop-up blocked — use the "Open export page" link', 'err');
 });
 
-// Selects
-document.getElementById('motionMode').addEventListener('change', e => save({ motionMode: e.target.value }));
-document.getElementById('edgeStyle').addEventListener('change', e => save({ edgeStyle: e.target.value }));
-document.getElementById('nodeColorMode').addEventListener('change', e => save({ nodeColorMode: e.target.value }));
-document.getElementById('labelFont').addEventListener('change', e => save({ labelFont: e.target.value }));
-
-// Sliders
-document.getElementById('glowIntensity').addEventListener('input', e => {
-  document.getElementById('glowIntensityVal').textContent = (e.target.value / 100).toFixed(2);
-});
-document.getElementById('glowIntensity').addEventListener('change', e => save({ glowIntensity: e.target.value / 100 }));
-
-document.getElementById('linkOpacity').addEventListener('input', e => {
-  document.getElementById('linkOpacityVal').textContent = (e.target.value / 100).toFixed(2);
-});
-document.getElementById('linkOpacity').addEventListener('change', e => save({ linkOpacity: e.target.value / 100 }));
-
-document.getElementById('particleSpeed').addEventListener('input', e => {
-  document.getElementById('particleSpeedVal').textContent = (e.target.value / 100).toFixed(1);
-});
-document.getElementById('particleSpeed').addEventListener('change', e => save({ particleSpeed: e.target.value / 100 }));
-
-document.getElementById('particleDensity').addEventListener('input', e => {
-  document.getElementById('particleDensityVal').textContent = (e.target.value / 100).toFixed(2);
-});
-document.getElementById('particleDensity').addEventListener('change', e => save({ particleDensity: e.target.value / 100 }));
-
-document.getElementById('labelMinImportance').addEventListener('input', e => {
-  document.getElementById('labelMinImportanceVal').textContent = (e.target.value / 100).toFixed(2);
-});
-document.getElementById('labelMinImportance').addEventListener('change', e => save({ labelMinImportance: e.target.value / 100 }));
-
-// Numbers
-document.getElementById('hubLabelCount').addEventListener('change', e => {
-  const v = Math.max(1, Math.min(50, parseInt(e.target.value) || 5));
-  e.target.value = v;
-  save({ hubLabelCount: v });
-});
-document.getElementById('refreshMs').addEventListener('change', e => {
-  const v = Math.max(1000, Math.min(60000, parseInt(e.target.value) || 5000));
-  e.target.value = v;
-  save({ refreshMs: v });
-});
-document.getElementById('maxRenderedNodes').addEventListener('change', e => {
-  const v = Math.max(100, Math.min(100000, parseInt(e.target.value) || 5000));
-  e.target.value = v;
-  save({ maxRenderedNodes: v });
-});
-
-// Reset to defaults — fetch canonical defaults from /api/defaults
-document.getElementById('resetDefaults').addEventListener('click', async () => {
-  try {
-    const r = await fetch(API + '/api/defaults');
-    if (!r.ok) throw new Error('defaults fetch failed');
-    const defaults = await r.json();
-    if (await save(defaults)) {
-      applyForm();
-      renderTags();
-    }
-  } catch (e) {
-    status(e.message || 'Reset failed', 'err');
-  }
-});
-
-// Theme toggle
-(function() {
-  const btn = document.getElementById('themeToggle');
-  const saved = localStorage.getItem('vaultwallpaper-theme');
-  if (saved === 'light') {
-    document.body.classList.add('light');
-    btn.innerHTML = '&#9790;';
-  }
+// ---------- page theme ----------
+(function () {
+  const btn = $('themeToggle');
+  let saved = null;
+  try { saved = localStorage.getItem('vaultwallpaper-theme'); } catch (e) { /* storage blocked */ }
+  if (saved === 'light') { document.body.classList.add('light'); btn.innerHTML = '&#9790;'; }
   btn.addEventListener('click', () => {
     const isLight = document.body.classList.toggle('light');
     btn.innerHTML = isLight ? '&#9790;' : '&#9788;';
-    localStorage.setItem('vaultwallpaper-theme', isLight ? 'light' : 'dark');
+    try { localStorage.setItem('vaultwallpaper-theme', isLight ? 'light' : 'dark'); } catch (e) { /* ignore */ }
   });
 })();
 
-// Copy current config as JSON
-document.getElementById('copyConfig').addEventListener('click', async () => {
-  try {
-    await navigator.clipboard.writeText(JSON.stringify(cfg, null, 2));
-    status('Copied to clipboard', 'ok');
-  } catch (e) {
-    status('Copy failed: ' + e.message, 'err');
-  }
-});
-
-// Paste JSON config
-document.getElementById('pasteConfig').addEventListener('click', async () => {
-  try {
-    const text = await navigator.clipboard.readText();
-    const parsed = JSON.parse(text);
-    if (!parsed || typeof parsed !== 'object') throw new Error('Invalid JSON');
-    if (await save(parsed)) {
-      applyForm();
-      renderTags();
-    }
-  } catch (e) {
-    status('Paste failed: ' + e.message, 'err');
-  }
-});
-
-// Save current config as custom preset
-document.getElementById('saveCustom').addEventListener('click', () => {
-  const name = prompt('Preset name:', 'Custom');
-  if (!name || !name.trim()) return;
-  const key = 'custom-' + name.trim().toLowerCase().replace(/\s+/g, '-');
-  const custom = { name: name.trim(), description: 'Custom preset', accent: cfg.accent, background: cfg.background, thumbnail: '', config: { ...cfg } };
-  const stored = JSON.parse(localStorage.getItem('vaultwallpaper-custom') || '[]');
-  const idx = stored.findIndex(p => p.name === custom.name);
-  if (idx >= 0) stored[idx] = custom;
-  else stored.push(custom);
-  localStorage.setItem('vaultwallpaper-custom', JSON.stringify(stored));
-  status('Saved: ' + custom.name, 'ok');
-  loadPresets();
-});
-
-// Keyboard shortcuts
+// ---------- keyboard ----------
 document.addEventListener('keydown', e => {
-  if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+  if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S')) {
     e.preventDefault();
-    save(cfg);
+    const a = document.activeElement;
+    // Commit a pending text edit first (blur fires its 'change' synchronously,
+    // which starts a save). Only re-save the whole config if nothing was pending,
+    // so a stale full save can't race and overwrite the edit.
+    if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA')) a.blur();
+    if (inflight === 0 && Object.keys(cfg).length) save(exportableConfig());
   }
   if (e.key === 'Escape') {
-    const statusEl = document.getElementById('status');
-    statusEl.className = 'status';
+    $('status').className = 'status';
+    if (!$('resetConfirm').hidden) { $('resetConfirm').hidden = true; $('resetDefaults').focus(); }
   }
 });
 
+// ---------- live updates ----------
+function connectEvents() {
+  if (typeof EventSource === 'undefined') return;
+  let es;
+  try { es = new EventSource(API + '/events'); } catch (e) { return; }
+  es.addEventListener('open', () => setConnStatus(true));
+  es.addEventListener('error', () => setConnStatus(false));
+  es.addEventListener('config', async () => {
+    try { cfg = await getJson('/api/config'); applyForm(); } catch (e) { /* ignore */ }
+  });
+  es.addEventListener('graph', () => { loadTags(); });
+}
+
+buildFields();
+['accent', 'background'].forEach(k => $(fid(k)).addEventListener('input', updateContrast));
+loadThemes();
 loadPresets();
-loadConfig().then(loadTags);
+loadConfig().then(loadTags).then(connectEvents);
 </script>
 </body></html>
