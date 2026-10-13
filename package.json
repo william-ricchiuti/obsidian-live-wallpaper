@@ -1,6 +1,6 @@
 {
   "name": "obsidian-live-wallpaper",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "description": "Your Obsidian vault graph as a live desktop wallpaper",
   "author": "William Ricchiuti",
   "homepage": "https://github.com/william-ricchiuti/obsidian-live-wallpaper#readme",
@@ -20,6 +20,8 @@
     "parser.js",
     "worker.js",
     "renderer-core.js",
+    "layout-core.js",
+    "gl-renderer.js",
     "presets.json",
     "bin/cli.js",
     "linux-setup.md",
@@ -49,7 +51,7 @@
     "smoke": "node scripts/smoke.js",
     "smoke:render": "node scripts/smoke-render.js",
     "test": "npm run smoke && npm run smoke:render",
-    "lint": "eslint parser.js bin/cli.js worker.js renderer-core.js scripts/*.js eslint.config.js",
+    "lint": "eslint parser.js bin/cli.js worker.js renderer-core.js layout-core.js gl-renderer.js themes/*.js scripts/*.js eslint.config.js",
     "prepublishOnly": "npm run lint && npm test"
   },
   "engines": {

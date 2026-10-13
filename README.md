@@ -8,34 +8,47 @@
 
 ![Demo](docs/demo.gif)
 
-![Style showcase](docs/style-showcase.png)
+![Style showcase](docs/style-showcase.jpg)
 
 Obsidian Live Wallpaper turns your vault graph into a live desktop backdrop: glowing nodes, tag-colored clusters, curated visual presets, smarter hub labels, and motion that stays atmospheric instead of noisy. It is built to feel like wallpaper first, graph tooling second.
 
 **macOS, Windows, and Linux.**
 
-## ✨ What's New in v1.1
+## ✨ What's New in v1.2
 
-Five new visual enhancements and four alternate rendering themes — all opt-in via config.
+Sixteen themes that each draw the graph a different way, plus new composition and battery options. Every theme is also a one-click preset.
 
-![Theme showcase](docs/theme-showcase-v2.png)
+![Theme showcase](docs/style-showcase.jpg)
 
-*Left to right, top to bottom: Ambient, Neon, Constellation, Synthwave, Abyss, Ink Wash, Sketch, Celestial, Stained Glass*
+**New themes** (set `"theme"`, or pick one on the settings page):
+- **Aurora**: curtains of coloured light over each tag cluster, with additive glow.
+- **Synapse**: notes you edited recently fire pulses that travel hop by hop through your links.
+- **Mycelium**: links grow as wandering hyphae, and amber pulses leave fresh notes.
+- **Phosphor**: a green CRT terminal where tags become glyphs, with scanlines and a live watch line.
+- **LED Board**: the graph resampled onto a grid of physical LEDs, with a scrolling stats ticker.
+- **Pocket Pixel**: a four-shade handheld palette with ordered dithering.
+- **Territories**: an atlas where tags become countries and hubs become capitals.
+- **Survey**: a topographic sheet where link density becomes contour lines.
+- **Metro**: a transit diagram that draws each tag's link tree as a coloured line.
+- **Risograph**: misregistered riso inks with halftoned hubs.
+- **Bauhaus**: a poster in primary colours where tags become shapes.
+- **Cross-stitch**: X stitches on Aida cloth.
+- **Stained Glass**: rebuilt on a real Voronoi diagram, so it is fast on big vaults.
+- **Celestial**, **Ink Wash** and **Sketchbook** now actually render. Before 1.2 no theme was ever drawn; see the changelog.
 
-**New rendering effects:**
-- **Glow breathing** — nodes slowly pulse over ~30s cycles, keeping the wallpaper alive during long desktop sessions
-- **Ambient particles** — free-floating motes drift independently of the graph, adding atmospheric depth
-- **Chromatic bloom** — bright nodes bloom into hue-shifted halos for a cinematic, photographic feel
-- **Depth parallax** — nodes rendered in 2–4 depth layers with independent motion, saturation, and blur
-- **Label modes** — per-preset label styling: badge, glow, minimal, and chromatic-split (pink/cyan for Synthwave/Vapor)
-
-**Four new rendering themes** (set `"theme"` in config):
-- **Celestial** — stars with diffraction spikes, orbital rings, and a slowly rotating starfield
-- **Ink Wash** — watercolor pigment bleed, brush-stroke edges, and paper texture
-- **Sketchbook** — hand-drawn jittered lines, notebook paper with ruled lines, graphite smudges
-- **Stained Glass** — *(experimental)* Voronoi-tessellated cells, colored by tag, with dark lead borders
-
-All new features are O(n) with zero performance regression. [`docs/themes/`](docs/themes/) has standalone screenshots of each theme.
+**New options:**
+- **`layout`**: `force`, `rings` (sectors by tag), `timeline` (old notes on the left, today on the right) or `galaxy` (one spiral arm per tag).
+- **`framing`**: fill the screen, centre the graph, or pull it into the left or right third, with `zoom` and offsets.
+- **`safeArea`**: keeps the graph out from under the menu bar, dock and desktop icons.
+- **`nodeColorMode: recency`**: dims everything you haven't touched in `recencyDays`.
+- **`timeOfDay`**: tints toward night, dawn and dusk by the clock, or switches to your light colours during the day.
+- **`overlay`**: a clock, vault stats, or a "note of the hour" card that shows a real note's title and first lines.
+- **`focusNote`**: shows only one note's neighbourhood. `today` means today's daily note.
+- **`rotate`**: cycles through a list of themes every N minutes.
+- **`palette`**: named palettes that work with any theme. **`tagShapes`**: a shape per tag. **`grain`** and **`vignette`**.
+- **`maxFps` / `idleFps`**: the wallpaper now idles at 10 fps by default, and `idleFps: 0` holds a still frame until something changes. It used to redraw at 60 fps forever whenever edge particles were on.
+- **Span across monitors**: open `/?span=1of2` and `/?span=2of2` on two screens to show one layout across both.
+- **Export PNG**: a button in settings, or open `/?export=1`.
 
 ## Why
 
@@ -62,7 +75,7 @@ The renderer is tuned for actual desktop use:
 
 ## Presets
 
-Eighteen curated looks, designed to span genuinely different points across five
+Thirty-four looks: eighteen tunings of the default renderer and sixteen themes. The default-renderer ones are designed to span genuinely different points across five
 visual axes (see [`docs/theme-axes.md`](docs/theme-axes.md)). Pick one in the
 settings page — or use it as a starting point and tweak.
 
@@ -74,6 +87,12 @@ settings page — or use it as a starting point and tweak.
 | ![Contrast](docs/presets/contrast.png)<br>**Contrast** | ![Synthwave](docs/presets/synthwave.png)<br>**Synthwave** | ![Mist](docs/presets/mist.png)<br>**Mist** |
 | ![Crystalline](docs/presets/crystalline.png)<br>**Crystalline** | ![Confetti](docs/presets/confetti.png)<br>**Confetti** | ![Abyss](docs/presets/abyss.png)<br>**Abyss** |
 | ![Ink](docs/presets/ink.png)<br>**Ink** | ![Library](docs/presets/library.png)<br>**Library** | ![Vapor](docs/presets/vapor.png)<br>**Vapor** |
+| ![Aurora](docs/presets/aurora.png)<br>**Aurora** | ![Synapse](docs/presets/synapse.png)<br>**Synapse** | ![Mycelium](docs/presets/mycelium.png)<br>**Mycelium** |
+| ![Phosphor](docs/presets/phosphor.png)<br>**Phosphor** | ![LED Board](docs/presets/led.png)<br>**LED Board** | ![Pocket Pixel](docs/presets/pixel.png)<br>**Pocket Pixel** |
+| ![Territories](docs/presets/territories.png)<br>**Territories** | ![Survey](docs/presets/survey.png)<br>**Survey** | ![Metro](docs/presets/metro.png)<br>**Metro** |
+| ![Risograph](docs/presets/riso.png)<br>**Risograph** | ![Bauhaus](docs/presets/bauhaus.png)<br>**Bauhaus** | ![Cross-stitch](docs/presets/stitch.png)<br>**Cross-stitch** |
+| ![Stained Glass](docs/presets/stained-glass.png)<br>**Stained Glass** | ![Celestial](docs/presets/celestial.png)<br>**Celestial** | ![Ink Wash](docs/presets/wash.png)<br>**Ink Wash** |
+| ![Sketchbook](docs/presets/sketch.png)<br>**Sketchbook** | | |
 
 ## Install
 
@@ -140,15 +159,15 @@ Three layers, each ignorant of the others:
 └──────────┘                  └──────────┘                  └────────────┘
 ```
 
-1. **`parser.js`** watches your vault, parses `[[wikilinks]]` and tags from every `.md` file, writes `graph.json`, and serves everything on the local loopback interface (`127.0.0.1:3000` by default).
-2. **`index.html`** loads `graph.json`, runs a d3 force simulation on a fullscreen canvas, and updates automatically when your vault changes.
+1. **`parser.js`** watches your vault, parses `[[wikilinks]]` and tags from every `.md` file, and serves the graph and app on the local loopback interface (`127.0.0.1:3000` by default). Links resolve the way Obsidian does: case-insensitively, by path, and ignoring image and PDF embeds.
+2. **`index.html`** loads the graph and runs the layout in a Web Worker (`worker.js` + `layout-core.js`). It draws with the active theme from `themes/`, and updates live when your vault changes. Editing a note's text doesn't move anything; adding a note only relaxes the layout around it.
 3. **Plash / Lively** renders the page as your desktop wallpaper.
 
 The clean separation means only the host changes per platform.
 
 ## Configuration
 
-Edit `config.json` for `vaultPath` and `port`. For everything else, use the settings page at `http://127.0.0.1:3000/settings.html` or edit `config.json` directly.
+Edit `config.json` for `vaultPath` and `port` (or point at another file with `npm start -- --config <file>` or `OLW_CONFIG`). For everything else, use the settings page at `http://127.0.0.1:3000/settings.html` or edit `config.json` directly.
 
 The renderer ships with a local vendored copy of D3, so the wallpaper still works offline after `npm install`.
 
@@ -163,7 +182,7 @@ The renderer ships with a local vendored copy of D3, so the wallpaper still work
 | `nodeGlow` | `true` | Radial glow halo around each node |
 | `glowIntensity` | `1` | Glow halo strength (`0`–`1`); lower for flatter looks |
 | `edgeStyle` | `"line"` | Edge rendering: `line`, `curve`, or `none` |
-| `nodeColorMode` | `"tag"` | Node coloring: `tag` (by first tag), `age` (by modified time), or `folder` (by top-level vault folder) |
+| `nodeColorMode` | `"tag"` | Node coloring: `tag` (by first tag), `age` (by modified time), `folder` (by top-level vault folder), or `recency` (tag colours, dimming notes older than `recencyDays`) |
 | `labelFont` | `"sans"` | Label typeface: `sans`, `mono`, or `serif` |
 | `particles` | `true` | Dots flowing along edges |
 | `particleSpeed` | `1` | Multiplier for particle travel speed |
@@ -199,8 +218,27 @@ The renderer ships with a local vendored copy of D3, so the wallpaper still work
 | `depthParallax` | `true` | Render nodes in depth layers with independent motion |
 | `depthParallaxStrength` | `0.5` | Layer separation intensity (`0`–`1`) |
 | `depthParallaxLayers` | `3` | Number of depth layers (`2`–`4`) |
-| `theme` | `"default"` | Rendering engine: `default`, `celestial`, `sketch`, `wash`, or `stained-glass` |
-| `labelStyle` | *(see presets)* | Per-preset label styling object with `mode`, `glowColor`, `chromaticSplit`, `fontStyle` |
+| `theme` | `"default"` | Rendering theme: `default` or any file in `themes/` (`aurora`, `synapse`, `mycelium`, `phosphor`, `led`, `pixel`, `territories`, `survey`, `metro`, `riso`, `bauhaus`, `stitch`, `stained-glass`, `celestial`, `wash`, `sketch`) |
+| `labelStyle` | `{}` | Label styling: `mode` (`badge`, `glow`, `minimal`, `inherit`), `backgroundAlpha`, `glowColor`, `chromaticSplit`. The font comes from `labelFont`. |
+| `layout` | `"force"` | `force`, `rings`, `timeline`, or `galaxy` |
+| `framing` | `"center"` | Where the graph sits: `center`, `fill`, `left`, `right`, or `none` (raw layout coordinates, the pre-1.2 behaviour) |
+| `zoom` | `1` | Extra scale on top of framing (`0.4`–`3`) |
+| `offsetX` / `offsetY` | `0` | Nudge the graph by up to half the framed area (`-1`–`1`) |
+| `safeArea` | all `0` | Pixels to keep clear on each side: `{ "top": 30, "right": 130, "bottom": 90, "left": 0 }` for a macOS menu bar, dock and icons |
+| `palette` | `"auto"` | `auto` (the theme's own colours or `tagColors`), `aurora`, `riso`, `metro`, `pastel`, `earth`, `neon`, `viridis`, `mono`. `tagColors` always wins for the tags it names. |
+| `recencyDays` | `7` | Days a note counts as recent, for `recency` colouring and Synapse/Mycelium pulses |
+| `timeOfDay` | `"off"` | `tint` (night, dawn and dusk colour wash) or `palette` (light colours from 07:00 to 19:00) |
+| `tagShapes` | `false` | Circle, square, triangle or diamond per tag in the default theme |
+| `grain` | `true` | Fine film grain; also hides gradient banding on large displays |
+| `vignette` | `false` | Darken the screen edges |
+| `overlay` | `"none"` | `clock`, `stats`, or `note` (note of the hour) |
+| `labelSource` | `"hubs"` | Label the most-linked notes, or the most `recent` edits |
+| `focusNote` | `""` | Show only this note's neighbourhood; `today` means today's daily note |
+| `focusHops` | `2` | How many links out from `focusNote` to show (`1`–`4`) |
+| `rotate` | `{ "themes": [], "everyMinutes": 60 }` | Cycle through these themes |
+| `maxFps` | `30` | Frame cap while something is changing; `0` = only redraw on change |
+| `idleFps` | `10` | Frame rate once the scene is settled; `0` = hold the last frame (near-zero CPU) |
+| `renderer` | `"auto"` | `auto` uses WebGL2 for vaults over ~3,000 notes; force `canvas` or `webgl` |
 
 ### Tags vs links
 
