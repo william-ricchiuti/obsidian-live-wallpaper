@@ -14,11 +14,16 @@ const {
   materializeGraph,
   scanVaultEntries,
   extractTag,
+  extractTags,
   extractWikilinks,
+  noteExcerpt,
   isIgnoredPath,
-  startApp
+  startApp,
+  DEFAULTS,
+  THEME_LIST
 } = require('../parser.js');
 const core = require('../renderer-core.js');
+const layoutCore = require('../layout-core.js');
 
 function assert(condition, message) {
   if (!condition) {
@@ -536,6 +541,10 @@ async function runLiveWatcherWithIgnorePaths(tmpRoot) {
       app.watcher.once('ready', resolve);
       setTimeout(() => reject(new Error('watcher never became ready')), 5000);
     });
+    // macOS FSEvents can drop a file created in the first moments after
+    // 'ready'; give the native watcher a beat so the test checks behaviour,
+    // not that startup race.
+    await new Promise(r => setTimeout(r, 300));
 
     let before = app.state.graphVersion;
     writeFile(path.join(vaultDir, 'Beta.md'), '# Beta\n[[Alpha]]\n');
@@ -695,11 +704,149 @@ function runParserFuzz() {
   assert(extractWikilinks('no links here').length === 0, 'no wikilinks');
 }
 
+
+function runNewParserFeatures() {
+  // All tags are kept, frontmatter first, then inline.
+  assert(JSON.stringify(extractTags('---\ntags: [project, idea]\n---\nbody #extra')) === JSON.stringify(['project', 'idea', 'extra']), 'extractTags keeps every tag in order');
+  assert(JSON.stringify(extractTags('---\ntags:\n  - a\n  - b\n---\n')) === JSON.stringify(['a', 'b']), 'extractTags block list');
+  // Attachments and embeds of non-notes are not links; .md suffix is stripped.
+  assert(extractWikilinks('![[photo.png]] [[scan.pdf]] ![[Other Note]] [[Note.md]]').join('|') === 'Other Note|Note',
+    `expected attachments skipped and .md stripped, got ${extractWikilinks('![[photo.png]] [[scan.pdf]] ![[Other Note]] [[Note.md]]').join('|')}`);
+  const ex = noteExcerpt('---\ntags: [x]\n---\n# Title\nSome **bold** text with [[Link|alias]] and [web](http://x).\n');
+  assert(/Some bold text with alias and web/.test(ex), `noteExcerpt strips markdown, got: ${ex}`);
+}
+
+async function runLinkResolution(tmpRoot) {
+  const vaultDir = path.join(tmpRoot, 'resolve-vault');
+  writeFile(path.join(vaultDir, 'Alpha.md'), '---\ntags: [project, idea]\n---\n[[beta]] [[Sub/Gamma]] ![[pic.png]]\n');
+  writeFile(path.join(vaultDir, 'Beta.md'), '#idea\n');
+  writeFile(path.join(vaultDir, 'Sub', 'Gamma.md'), 'x\n');
+  const entries = await scanVaultEntries(vaultDir);
+  const g = materializeGraph(entries, vaultDir, { showUnresolvedLinks: true });
+  const ghosts = g.nodes.filter(n => n.ghost).map(n => n.id);
+  assert(ghosts.length === 0, `expected no false ghosts from case/path/embed links, got [${ghosts.join(', ')}]`);
+  assert(g.links.length === 2, `expected 2 resolved links, got ${g.links.length}`);
+  assert(g.discoveredTags.idea === 2 && g.discoveredTags.project === 1, `expected every tag counted, got ${JSON.stringify(g.discoveredTags)}`);
+  const alpha = g.nodes.find(n => n.id === 'Alpha');
+  assert(alpha.tag === 'project' && alpha.tags.length === 2, 'expected primary tag plus full tag list');
+}
+
+function runIndexDefaultsMatchParser() {
+  // index.html keeps a fallback DEFAULTS copy for synthetic/offline mode; it
+  // must not drift from the canonical parser.js DEFAULTS.
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const m = html.match(/const DEFAULTS = (\{[\s\S]*?\n\});/);
+  assert(m, 'expected a DEFAULTS literal in index.html');
+  const indexDefaults = new Function('return ' + m[1])();
+  const { vaultPath, port, ...canonical } = DEFAULTS;
+  const a = JSON.stringify(Object.keys(canonical).sort().map(k => [k, canonical[k]]));
+  const b = JSON.stringify(Object.keys(indexDefaults).sort().map(k => [k, indexDefaults[k]]));
+  assert(a === b, 'index.html DEFAULTS drifted from parser.js DEFAULTS');
+}
+
+function runThemesRegistry() {
+  // Every discovered theme file must register itself under its file name, or
+  // the validator would accept a theme the renderer can't draw.
+  assert(THEME_LIST[0].id === 'default', 'default theme first');
+  assert(THEME_LIST.length >= 17, `expected at least 17 themes, got ${THEME_LIST.length}`);
+  for (const t of THEME_LIST.slice(1)) {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'themes', t.id + '.js'), 'utf8');
+    const registers = src.includes(`THEMES['${t.id}']`) || (/^[a-z]+$/.test(t.id) && src.includes(`THEMES.${t.id} =`));
+    assert(registers, `themes/${t.id}.js must register THEMES['${t.id}']`);
+    assert(t.name && t.description, `themes/${t.id}.js needs @name and @description headers`);
+  }
+  // Every preset's theme must exist.
+  const presets = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'presets.json'), 'utf8'));
+  const ids = new Set(THEME_LIST.map(t => t.id));
+  for (const p of presets) {
+    assert(ids.has(p.config.theme || 'default'), `preset ${p.name} uses unknown theme ${p.config.theme}`);
+    assert(!('tagColors' in p.config), `preset ${p.name} must not overwrite tagColors`);
+  }
+}
+
+function runNewCoreHelpers() {
+  assert(core.contrastRatio('#000000', '#ffffff') > 20, 'contrast black/white');
+  const fixed = core.ensureContrast('#0a3d3d', '#020608', 1.8);
+  assert(core.contrastRatio(fixed, '#020608') >= 1.8, 'ensureContrast raises a too-dark accent');
+  assert(core.ensureContrast('#ffffff', '#000000', 1.8) === '#ffffff', 'ensureContrast leaves good contrast alone');
+  assert(core.timeOfDayTint(23).phase === 'night' && core.timeOfDayTint(12) === null && core.timeOfDayTint(6).phase === 'dawn', 'timeOfDayTint phases');
+  assert(core.configValueEqual({ a: 1, b: [1, 2] }, { b: [1, 2], a: 1.0004 }), 'configValueEqual structural with tolerance');
+  assert(!core.configValueEqual({ a: 1 }, { a: 1, b: 2 }), 'configValueEqual key mismatch');
+  assert(Object.values(core.PALETTES).every(p => p.length === 8), 'palettes have 8 colours');
+  const [dx1] = core.flowOffset(100, 100, 5);
+  const [dx2] = core.flowOffset(102, 101, 5);
+  assert(Math.abs(dx1 - dx2) < 0.05, 'flowOffset is smooth: neighbours move together');
+}
+
+function runLayoutTargets() {
+  const nodes = [];
+  const links = [];
+  for (let i = 0; i < 60; i++) nodes.push({ id: 'n' + i, tag: ['a', 'b', 'c'][i % 3], mtime: Date.now() - i * 86400000 });
+  nodes.push({ id: 'ghost', ghost: true });
+  for (let i = 1; i < 60; i++) links.push({ source: 'n' + i, target: 'n' + Math.floor(i / 2) });
+  for (const layout of ['rings', 'timeline', 'galaxy']) {
+    const t = layoutCore.computeTargets(layout, nodes, links, { width: 1200, height: 800, centerX: 600, centerY: 400 });
+    assert(t && t.length === nodes.length * 2 && Array.from(t).every(Number.isFinite), `${layout} targets must be finite for every node`);
+  }
+  assert(layoutCore.computeTargets('force', nodes, links, {}) === null, 'force has no targets');
+}
+
+async function runNewRoutes(tmpRoot) {
+  const vaultDir = path.join(tmpRoot, 'routes-vault');
+  writeFile(path.join(vaultDir, 'Alpha.md'), '# Alpha\nThis is a longer body of text so the excerpt has something real in it. [[Beta]]\n');
+  writeFile(path.join(vaultDir, 'Beta.md'), '# Beta\nAnother note with enough text to be chosen as note of the hour.\n');
+  const configPath = path.join(tmpRoot, 'routes-config.json');
+  writeJson(configPath, { vaultPath: vaultDir, port: 4321 });
+  const state = {
+    cfg: sanitizePersistedConfig({ vaultPath: vaultDir, port: 4321 }),
+    configPath,
+    outPath: path.join(tmpRoot, 'routes-graph.json'),
+    entries: await scanVaultEntries(vaultDir)
+  };
+  await rebuildGraphState(state);
+  const handler = createRequestHandler(state);
+  const host = { host: '127.0.0.1:4321' };
+
+  const themes = JSON.parse((await runHandler(handler, 'GET', '/api/themes')).body);
+  assert(themes.some(t => t.id === 'aurora'), 'expected /api/themes to list discovered themes');
+
+  const note = JSON.parse((await runHandler(handler, 'GET', '/api/note-of-hour?hour=123')).body);
+  assert(note.title === 'Alpha' || note.title === 'Beta', `expected a note of the hour, got ${JSON.stringify(note)}`);
+  assert(note.excerpt.length > 20 && !note.excerpt.includes('[['), 'expected a plain-text excerpt');
+
+  const first = await runHandler(handler, 'GET', '/graph.json');
+  const etag = first.headers && (first.headers.ETag || first.headers.etag);
+  assert(etag, 'expected an ETag on /graph.json');
+  const second = await runHandler(handler, 'GET', '/graph.json', undefined, { 'if-none-match': etag });
+  assert(second.statusCode === 304, `expected 304 for an unchanged graph, got ${second.statusCode}`);
+
+  const save = await runHandler(handler, 'POST', '/api/custom-presets', JSON.stringify({ name: 'Mine', config: { accent: '#112233', theme: 'metro' } }), { ...host, 'content-type': 'application/json' });
+  assert(save.statusCode === 200, `expected custom preset save to succeed, got ${save.statusCode} ${save.body}`);
+  const list = JSON.parse((await runHandler(handler, 'GET', '/api/custom-presets')).body);
+  assert(list.length === 1 && list[0].config.theme === 'metro', 'expected the custom preset to persist');
+  const bad = await runHandler(handler, 'POST', '/api/custom-presets', JSON.stringify({ name: 'Bad', config: { theme: 'nope' } }), { ...host, 'content-type': 'application/json' });
+  assert(bad.statusCode === 400, 'expected an invalid custom preset to be rejected');
+  const del = JSON.parse((await runHandler(handler, 'DELETE', '/api/custom-presets?name=Mine', undefined, host)).body);
+  assert(del.length === 0, 'expected the custom preset to be deleted');
+
+  const patch = await runHandler(handler, 'POST', '/api/config', JSON.stringify({ layout: 'rings', framing: 'left', safeArea: { top: 30, bottom: 90 }, rotate: { themes: ['aurora', 'metro'], everyMinutes: 30 }, maxFps: 0, idleFps: 0 }), { ...host, 'content-type': 'application/json' });
+  assert(patch.statusCode === 200, `expected the new keys to validate, got ${patch.body}`);
+  const cfgOut = JSON.parse(patch.body);
+  assert(cfgOut.safeArea.right === 0 && cfgOut.safeArea.top === 30, 'safeArea fills missing sides with 0');
+  const badRotate = await runHandler(handler, 'POST', '/api/config', JSON.stringify({ rotate: { themes: ['nope'] } }), { ...host, 'content-type': 'application/json' });
+  assert(badRotate.statusCode === 400, 'rotate must reject unknown themes');
+}
+
 async function main() {
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'obsidian-live-wallpaper-smoke-'));
   try {
     runRendererCore();
+    runNewCoreHelpers();
     runParserFuzz();
+    runNewParserFeatures();
+    runIndexDefaultsMatchParser();
+    runThemesRegistry();
+    runLayoutTargets();
     runConfigValidationThrows();
     runIgnorePathsUnit();
     runPresetsValidateAgainstSchema();
@@ -715,6 +862,8 @@ async function main() {
     await runLiveWatcherWithIgnorePaths(tmpRoot);
     await runSymlinkCycleGuard(tmpRoot);
     await runEaddrinuse(tmpRoot);
+    await runLinkResolution(tmpRoot);
+    await runNewRoutes(tmpRoot);
     console.log('smoke: ok');
   } finally {
     fs.rmSync(tmpRoot, { recursive: true, force: true });
