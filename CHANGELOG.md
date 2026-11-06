@@ -11,6 +11,30 @@
 - **`idleFps` defaults to 5** (was 10). Configs that set `idleFps` explicitly keep their value; that includes configs copied from an older `config.example.json`, which had `10`.
 - **Links and tags closer to Obsidian:** links and `#tags` inside code blocks and inline code are ignored; `[text](Note.md)` markdown links count as links; tags may use any letter and digits (`#café`, `#2024-review`, but not `#2024`); frontmatter `tag:` and `tags: a, b` are read; tags are case-insensitive across the vault (the first spelling wins), so a `tagColors` key may need renaming.
 
+### Performance
+- **Scene themes honour the large-vault budgets.** They used to stroke every link and show up to 7 labels regardless of size; they now follow the same link step and label count as the default pipeline.
+- **Themes build heavy geometry once per layout instead of every frame:** Path2D caching for edges, Metro, Cross-stitch, Stained Glass, Territories, Survey, Sketch and Wash; Celestial's nebula is a cached bitmap limited to the top 8 tags; LED reads its board back once per layout instead of every frame (about 3× faster in software rendering); per-node string and array allocations removed across the theme kit.
+- **Renderer:** settings changes only redo the work their keys affect (ambient dust no longer jumps); the glow sprite cache sizes itself to the colours in use; label and node loops stop allocating per frame; the WebGL path keeps its buffers and skips frames when nothing moved, and no longer needs `preserveDrawingBuffer`; graph reloads are coalesced; placing many new notes no longer scans every link per note.
+
+### Fixed (renderer, settings, server)
+- Very large vaults showed almost no edges (link sampling ignored the render cap).
+- A low-degree `focusNote` could show an empty view under the render cap.
+- `?span=` screens seeded new notes randomly, so monitors disagreed; seeding is now deterministic.
+- Theme rotation, time-of-day and auto light/dark left stale edge colours.
+- "Recent" and age values in scene themes went stale until the vault changed.
+- Display scaling changes (moving to another monitor) are picked up; resize work is debounced.
+- Settings: quick edits to nested options (safe area, label style, tag colours) no longer overwrite each other; the page reloads its data after the server reconnects; errors stay on screen until dismissed.
+- Symlinked notes are scanned and watched consistently; `ignorePaths` accepts trailing slashes, either separator, and (on macOS/Windows) any letter case.
+- A deleted note could come back if its file was still being parsed.
+- `settings.html` can no longer be framed by other sites; JSON requests with `; charset=utf-8` are accepted; custom presets are capped at 100, validated on read, and no longer capture `focusNote`; oversized requests get a clean 413; `[::1]` hosts work.
+- Light themes: Wash no longer goes dark-on-dark, and user palettes no longer wash out; long labels are truncated and flip left instead of disappearing; LED now draws its labels; Metro's legend no longer overlaps on small screens.
+
+### Tooling
+- Node 20.19+ is required (chokidar 5); CI tests 20.19, 22 and 24.
+- `npm run lint` now covers the inline scripts in `index.html` and `settings.html`.
+- The render smoke test fails in CI when Chrome is missing instead of skipping, and test servers use free ports (a fixed port could let another running copy answer and the test pass without testing anything).
+- The release workflow checks the tag matches `package.json`; docs fixed (troubleshooting, performance advice, architecture, config ranges, SECURITY.md).
+
 ### Fixed
 - **The wallpaper never went back to idling after a new note appeared.** Flares were only removed while the default theme drew nodes, so with a scene theme, WebGL, or flares disabled (large vaults, reduced motion) the loop stayed at `maxFps`. Flares now end on time.
 - **Animated themes (LED, Mycelium, Phosphor, Synapse) stuttered at the idle rate.** Their `alwaysAnimate` flag was never read; they now keep at least 15 fps (still respecting `idleFps: 0` and reduced motion). Idle frames are also no longer skipped as "early", which halved low idle rates.
