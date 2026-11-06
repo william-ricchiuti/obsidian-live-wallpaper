@@ -9,25 +9,41 @@
     kind: 'scene', name: 'Phosphor', dark: true, fg: '#5dff8f', ghost: '#1f6a3a', motion: 0.4,
     background: '#020b05', alwaysAnimate: true,
     pal: ['#5dff8f'], labelFont: K.MONO, labelSize: 11,
-    labelText: n => '[[' + n.label + ']]',
+    labelText: (_n, _S, label) => '[[' + label + ']]',
     draw(ctx, S, t) {
       const { W, H, k } = S;
       const G = this.fg;
       ctx.fillStyle = this.background;
       ctx.fillRect(0, 0, W, H);
       ctx.setLineDash([1.4 * k, 3.6 * k]);
-      K.edgesBatched(ctx, S, () => G, 0.2, 0.8 * k, false);
+      K.edgesBatched(ctx, S, () => G, 0.2, 0.8 * k, false, null, 'phosphor');
       ctx.setLineDash([]);
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = G;
-      for (const n of S.nodes) {
-        const sz = Math.max(7, Math.round((8 + n.imp * 20) * k));
-        ctx.font = `${n.imp > 0.4 ? 600 : 400} ${sz}px ${K.MONO}`;
-        ctx.globalAlpha = (n.ghost ? 0.3 : 0.45 + 0.55 * n.imp) * (n.dim ? 0.3 : 1);
-        if (n.imp > 0.45) { ctx.shadowColor = G; ctx.shadowBlur = 10 * k; }
-        const glyph = n.ghost ? '·' : S.o.colorBy === 'age' ? AGE_GLYPHS[Math.max(0, n.ci) % 5] : GLYPHS[((n.ci % 8) + 8) % 8];
-        ctx.fillText(glyph, n.x, n.y);
+      // Glyphs bucketed by font (weight, integer size) and glow once per
+      // layout, so ctx.font is parsed once per bucket instead of per node.
+      const buckets = K.memo('phosphor', S, k, () => {
+        const m = new Map();
+        for (const n of S.nodes) {
+          const sz = Math.max(7, Math.round((8 + n.imp * 20) * k));
+          const bold = n.imp > 0.4, glow = n.imp > 0.45;
+          const key = sz * 4 + (bold ? 2 : 0) + (glow ? 1 : 0);
+          let b = m.get(key);
+          if (!b) { b = { font: `${bold ? 600 : 400} ${sz}px ${K.MONO}`, glow, list: [] }; m.set(key, b); }
+          const glyph = n.ghost ? '·' : S.o.colorBy === 'age' ? AGE_GLYPHS[Math.max(0, n.ci) % 5] : GLYPHS[((n.ci % 8) + 8) % 8];
+          b.list.push(n, glyph, (n.ghost ? 0.3 : 0.45 + 0.55 * n.imp) * (n.dim ? 0.3 : 1));
+        }
+        return Array.from(m.values());
+      });
+      for (const b of buckets) {
+        ctx.font = b.font;
+        if (b.glow) { ctx.shadowColor = G; ctx.shadowBlur = 10 * k; }
+        const l = b.list;
+        for (let i = 0; i < l.length; i += 3) {
+          ctx.globalAlpha = l[i + 2];
+          ctx.fillText(l[i + 1], l[i].x, l[i].y);
+        }
         ctx.shadowBlur = 0;
       }
       ctx.globalAlpha = 1;

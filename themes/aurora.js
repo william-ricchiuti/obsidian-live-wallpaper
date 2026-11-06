@@ -16,7 +16,7 @@
       ctx.fillRect(0, 0, W, H);
       ctx.globalCompositeOperation = 'lighter';
       for (const c of S.clusters) {
-        const pal = S.pal || this.pal;
+        const pal = K.pal(this, S);
         const color = pal[c.ti % pal.length];
         const rad = Math.max(90 * k, c.rad * 1.5);
         for (let j = 0; j < 3; j++) {
@@ -34,7 +34,7 @@
           ctx.restore();
         }
       }
-      K.edgesBatched(ctx, S, l => K.col(this, S, l.a), 0.13, 0.8 * k, true);
+      K.edgesBatched(ctx, S, l => K.col(this, S, l.a), 0.13, 0.8 * k, true, null, 'aurora');
       for (const n of S.nodes) {
         const c = K.col(this, S, n);
         const s = (n.r * 5 + 6 * k) * (1 + 0.12 * Math.sin(t * 0.5 + n.ph));
