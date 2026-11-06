@@ -125,7 +125,7 @@
   .status { position: fixed; bottom: 16px; right: 16px; left: auto; max-width: calc(100% - 32px); font-size: 13px; padding: 8px 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; color: var(--dim); opacity: 0; pointer-events: none; transition: opacity 0.2s; z-index: 10; }
   .status.show { opacity: 1; }
   .status.ok { color: var(--ok); }
-  .status.err { color: var(--err); border-color: var(--err); }
+  .status.err { color: var(--err); border-color: var(--err); pointer-events: auto; cursor: pointer; }
 </style>
 </head>
 <body>
@@ -288,7 +288,22 @@
 <script>
 'use strict';
 const API = window.location.origin;
-let cfg = {};          // last good config from the server
+// cfg is what the page shows: the last config the server confirmed
+// (serverCfg) with every not-yet-confirmed patch applied on top. Patches for
+// nested keys (safeArea, labelStyle, tagColors) are built from cfg, so a quick
+// second edit builds on the first one instead of on stale server state.
+let serverCfg = {};
+let cfg = {};
+const pendingPatches = [];
+let saveChain = Promise.resolve();
+function syncLocalCfg() {
+  const next = { ...serverCfg };
+  for (const p of pendingPatches) {
+    for (const [k, v] of Object.entries(p)) if (k !== '__proto__') next[k] = v;
+  }
+  cfg = next;
+}
+function setServerCfg(next) { serverCfg = next || {}; syncLocalCfg(); }
 let allTags = {};
 let THEMES = [];
 let BUILTIN = [];
@@ -474,7 +489,7 @@ function buildFields() {
     } else if (f.t === 'int') {
       el.addEventListener('change', () => {
         const n = parseInt(el.value, 10);
-        if (!Number.isFinite(n)) { status(`${f.label} must be a whole number`, 'err'); applyForm(true); return; }
+        if (!Number.isFinite(n)) { status(`${f.label} must be a whole number`, 'err'); applyForm(false, new Set([f.k.split('.')[0]])); return; }
         const v = Math.min(f.max, Math.max(f.min, n));
         el.value = v;
         save(patchFor(f.k, v));
@@ -551,40 +566,73 @@ function setConnStatus(connected) {
   el.textContent = connected ? '● Connected' : '○ Disconnected';
   el.className = 'conn-status ' + (connected ? 'connected' : 'disconnected');
 }
+// Errors stay up until clicked, Escape, or the next status message; other
+// messages fade after 2 s.
 function status(msg, type) {
   const el = $('status');
   el.textContent = msg;
   el.className = 'status show ' + (type || '');
+  el.title = type === 'err' ? 'Click to dismiss' : '';
   clearTimeout(el._t);
-  el._t = setTimeout(() => { el.className = 'status'; }, type === 'err' ? 5000 : 2000);
+  if (type !== 'err') el._t = setTimeout(() => { el.className = 'status'; }, 2000);
+}
+$('status').addEventListener('click', () => { $('status').className = 'status'; });
+// fetch() rejects with a bare TypeError ("Failed to fetch", "Load failed")
+// when the server can't be reached at all.
+function friendlyError(e, fallback) {
+  if (e instanceof TypeError) {
+    setConnStatus(false);
+    return 'Server unreachable: is the wallpaper server running? Change not saved.';
+  }
+  return (e && e.message) || fallback;
 }
 
 // ---------- save ----------
+// Saves are applied to cfg at once (so the next patch builds on them) and
+// POSTed one at a time, in order, so a slow response can't land after a newer
+// one and overwrite it.
 let inflight = 0;
-async function save(updates) {
+function save(updates) {
+  const patch = updates || {};
+  pendingPatches.push(patch);
+  syncLocalCfg();
   inflight++;
+  const run = saveChain.then(() => postConfig(patch));
+  saveChain = run.catch(() => {});
+  return run;
+}
+async function postConfig(patch) {
+  let ok = false, err = null;
   try {
     const r = await fetch(API + '/api/config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(updates)
+      body: JSON.stringify(patch)
     });
     let data = {};
     try { data = await r.json(); } catch (e) { /* non-JSON error body */ }
     if (!r.ok) throw new Error(data.error || `save failed: ${r.status}`);
-    cfg = data;
-    setConnStatus(true);
-    status('Saved', 'ok');
-    applyForm(true);
-    return true;
+    serverCfg = data;
+    ok = true;
   } catch (e) {
-    status(e.message || 'Save failed', 'err');
-    // Revert only the rejected keys (even if focused); leave other in-progress edits alone.
-    applyForm(false, new Set(Object.keys(updates || {})));
-    return false;
+    err = e;
   } finally {
+    const i = pendingPatches.indexOf(patch);
+    if (i >= 0) pendingPatches.splice(i, 1);
+    syncLocalCfg();
     inflight--;
   }
+  if (ok) {
+    setConnStatus(true);
+    if (inflight === 0) status('Saved', 'ok');
+    // Not forced: the control the user is typing in keeps its text.
+    applyForm();
+    return true;
+  }
+  status(friendlyError(err, 'Save failed'), 'err');
+  // Revert only the rejected keys (even if focused); leave other in-progress edits alone.
+  applyForm(false, new Set(Object.keys(patch)));
+  return false;
 }
 
 async function getJson(path) {
@@ -595,7 +643,7 @@ async function getJson(path) {
 
 async function loadConfig() {
   try {
-    cfg = await getJson('/api/config');
+    setServerCfg(await getJson('/api/config'));
     setConnStatus(true);
     applyForm();
   } catch (e) {
@@ -653,7 +701,10 @@ function deepEqual(a, b) {
 // Compare only the keys a preset defines; objects (labelStyle, safeArea, rotate) structurally.
 function presetPatch(p) {
   const c = { ...(p.config || {}) };
+  // Vault-specific keys never come from a preset.
   delete c.tagColors;
+  delete c.ignorePaths;
+  delete c.focusNote;
   return c;
 }
 function presetMatches(p) {
@@ -702,7 +753,7 @@ $('presets').addEventListener('click', async e => {
       CUSTOM = data;
       renderPresets();
       status('Preset deleted', 'ok');
-    } catch (err) { status(err.message || 'Delete failed', 'err'); }
+    } catch (err) { status(friendlyError(err, 'Delete failed'), 'err'); }
     return;
   }
   const btn = e.target.closest('.preset');
@@ -717,7 +768,7 @@ $('presets').addEventListener('click', async e => {
 function presetConfigFrom(c) {
   const out = {};
   for (const [k, v] of Object.entries(c || {})) {
-    if (k === 'tagColors' || k === 'ignorePaths') continue;
+    if (k === 'tagColors' || k === 'ignorePaths' || k === 'focusNote') continue;
     out[k] = k === 'labelStyle' ? cleanNested(k, v) : v;
   }
   return out;
@@ -740,7 +791,7 @@ $('saveCustomForm').addEventListener('submit', async e => {
     input.value = '';
     renderPresets();
     status('Saved preset: ' + name, 'ok');
-  } catch (err) { status(err.message || 'Save failed', 'err'); }
+  } catch (err) { status(friendlyError(err, 'Save failed'), 'err'); }
 });
 
 async function migrateLocalPresets(defaults) {
@@ -804,7 +855,7 @@ $('resetYes').addEventListener('click', async () => {
   try {
     const defaults = await getJson('/api/defaults'); // includes labelStyle: {} and tagColors: {}
     if (await save(defaults)) status('Reset to defaults', 'ok');
-  } catch (e) { status(e.message || 'Reset failed', 'err'); }
+  } catch (e) { status(friendlyError(e, 'Reset failed'), 'err'); }
 });
 
 // ---------- safe area / ignore paths ----------
@@ -814,7 +865,7 @@ document.querySelectorAll('[data-safe]').forEach(b => b.addEventListener('click'
 }));
 document.querySelectorAll('.safe-grid input').forEach(inp => inp.addEventListener('change', () => {
   const n = parseInt(inp.value, 10);
-  if (!Number.isFinite(n)) { status('Safe area must be a whole number of pixels', 'err'); applyForm(true); return; }
+  if (!Number.isFinite(n)) { status('Safe area must be a whole number of pixels', 'err'); applyForm(false, new Set(['safeArea'])); return; }
   const sa = { top: 0, right: 0, bottom: 0, left: 0, ...(cfg.safeArea || {}) };
   sa[inp.dataset.side] = Math.min(1000, Math.max(0, n));
   save({ safeArea: sa });
@@ -854,7 +905,7 @@ function updateContrast() {
 function sortedTags() {
   const tc = cfg.tagColors || {};
   return Object.entries(allTags).sort((a, b) => {
-    const ac = tc[a[0]] ? 1 : 0, bc = tc[b[0]] ? 1 : 0;
+    const ac = Object.hasOwn(tc, a[0]) ? 1 : 0, bc = Object.hasOwn(tc, b[0]) ? 1 : 0;
     if (ac !== bc) return bc - ac;
     return b[1] - a[1] || a[0].localeCompare(b[0]);
   });
@@ -866,7 +917,7 @@ function renderTags() {
   const el = $('tagList');
   const tc = cfg.tagColors || {};
   const sorted = sortedTags();
-  const sig = JSON.stringify(sorted.map(([t]) => [t, !!tc[t]]));
+  const sig = JSON.stringify(sorted.map(([t]) => [t, Object.hasOwn(tc, t)]));
   if (sig === tagSignature) {
     // Same set of rows: update in place so keyboard focus is kept.
     sorted.forEach(([tag, count]) => {
@@ -901,14 +952,16 @@ function renderTags() {
 $('tagList').addEventListener('change', e => {
   const inp = e.target.closest('.tag-color');
   if (!inp) return;
-  save({ tagColors: { ...(cfg.tagColors || {}), [inp.dataset.tag]: inp.value } });
+  // Built as entries so a tag named "__proto__" stays an own key.
+  const entries = Object.entries(cfg.tagColors || {}).filter(([t]) => t !== inp.dataset.tag);
+  entries.push([inp.dataset.tag, inp.value]);
+  save({ tagColors: Object.fromEntries(entries) });
 });
 $('tagList').addEventListener('click', e => {
   const btn = e.target.closest('.tag-remove');
   if (!btn || btn.classList.contains('placeholder')) return;
-  const tc = { ...(cfg.tagColors || {}) };
-  delete tc[btn.dataset.tag];
-  save({ tagColors: tc });
+  const tag = btn.dataset.tag;
+  save({ tagColors: Object.fromEntries(Object.entries(cfg.tagColors || {}).filter(([t]) => t !== tag)) });
 });
 async function loadTags() {
   try { allTags = await getJson('/api/tags'); } catch (e) { allTags = {}; }
@@ -958,10 +1011,21 @@ function connectEvents() {
   if (typeof EventSource === 'undefined') return;
   let es;
   try { es = new EventSource(API + '/events'); } catch (e) { return; }
-  es.addEventListener('open', () => setConnStatus(true));
+  let opened = false;
+  es.addEventListener('open', () => {
+    setConnStatus(true);
+    // A reconnect (server restarted, laptop woke up): anything may have
+    // changed while we were away, so reload it all.
+    if (opened) {
+      loadConfig().then(loadTags);
+      loadThemes();
+      loadPresets();
+    }
+    opened = true;
+  });
   es.addEventListener('error', () => setConnStatus(false));
   es.addEventListener('config', async () => {
-    try { cfg = await getJson('/api/config'); applyForm(); } catch (e) { /* ignore */ }
+    try { setServerCfg(await getJson('/api/config')); applyForm(); } catch (e) { /* ignore */ }
   });
   es.addEventListener('graph', () => { loadTags(); });
 }

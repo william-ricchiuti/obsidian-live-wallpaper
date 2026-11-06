@@ -10,7 +10,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { startApp, sanitizePersistedConfig } = require('../parser.js');
+const { startApp, sanitizePersistedConfig, writeConfigFile } = require('../parser.js');
 
 const args = process.argv.slice(2);
 
@@ -80,8 +80,10 @@ try {
   process.exit(1);
 }
 
+// Atomic (tmp file + rename), like the server's own config writes, so a crash
+// or a concurrent reader never sees a half-written file.
 try {
-  fs.writeFileSync(configPath, JSON.stringify(cfg, null, 2));
+  writeConfigFile(cfg, configPath);
 } catch (e) {
   console.error(`Could not write config to ${configPath}: ${e.message}`);
   process.exit(1);

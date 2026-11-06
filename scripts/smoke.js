@@ -19,6 +19,10 @@ const {
   extractWikilinks,
   noteExcerpt,
   isIgnoredPath,
+  isTrustedHost,
+  isJsonContentType,
+  sanitizeCustomPresets,
+  MAX_CUSTOM_PRESETS,
   startApp,
   DEFAULTS,
   THEME_LIST
@@ -971,6 +975,184 @@ async function runNewRoutes(tmpRoot) {
   assert(badRotate.statusCode === 400, 'rotate must reject unknown themes');
 }
 
+function runIgnorePathsNormalisation() {
+  const v = path.join(path.sep, 'vault');
+  const f = (...parts) => path.join(v, ...parts);
+  // Trailing separators and either separator style mean the same folder.
+  assert(isIgnoredPath(f('templates', 'a.md'), v, ['templates/'], false), 'trailing / must be trimmed');
+  assert(isIgnoredPath(f('templates', 'a.md'), v, ['templates\\'], false), 'trailing \\ must be trimmed');
+  assert(isIgnoredPath(f('Archive', 'Old', 'a.md'), v, ['Archive\\Old'], false), 'backslash prefix must match');
+  assert(isIgnoredPath(f('Archive', 'Old', 'a.md'), v, ['Archive/Old/'], false), 'slash prefix must match');
+  assert(isIgnoredPath(f('Archive', 'Old', 'a.md'), v, ['./Archive/Old'], false), 'leading ./ must be trimmed');
+  assert(!isIgnoredPath(f('Archive', 'Older', 'a.md'), v, ['Archive/Old'], false), 'prefix must end at a segment boundary');
+  assert(!isIgnoredPath(f('Archive', 'a.md'), v, ['Archive/Old'], false), 'a parent folder of the pattern is not ignored');
+  // Case: insensitive on macOS/Windows, sensitive elsewhere.
+  assert(isIgnoredPath(f('Templates', 'a.md'), v, ['templates'], true), 'case-insensitive match expected');
+  assert(isIgnoredPath(f('sub', 'TEMPLATES', 'a.md'), v, ['Templates/'], true), 'case-insensitive segment match expected');
+  assert(!isIgnoredPath(f('Templates', 'a.md'), v, ['templates'], false), 'case-sensitive mode must not fold case');
+  assert(!isIgnoredPath(f('notes', 'a.md'), v, ['/', '  '], false), 'an empty pattern after trimming must match nothing');
+}
+
+async function runStaleParseDiscard(tmpRoot) {
+  const vaultDir = path.join(tmpRoot, 'stale-vault');
+  const file = path.join(vaultDir, 'Alpha.md');
+  writeFile(file, '# Alpha\n[[Beta]]\n');
+  const state = { cfg: sanitizePersistedConfig({ vaultPath: vaultDir }), entries: new Map() };
+  // An add whose parse is still in flight when the unlink arrives must not
+  // resurrect the note.
+  const addP = applyFsEventToState(state, 'add', file);
+  const unlinked = await applyFsEventToState(state, 'unlink', file);
+  assert(unlinked === false, 'nothing to delete yet');
+  assert((await addP) === false, 'a stale add must report no change');
+  assert(!state.entries.has(file), 'a stale add must not resurrect an unlinked note');
+  // Same for an unlinkDir of the parent folder.
+  const nested = path.join(vaultDir, 'sub', 'Nested.md');
+  writeFile(nested, '# Nested\n');
+  const addNested = applyFsEventToState(state, 'add', nested);
+  await applyFsEventToState(state, 'unlinkDir', path.join(vaultDir, 'sub'));
+  await addNested;
+  assert(!state.entries.has(nested), 'a stale add must not survive unlinkDir of its folder');
+  // Two overlapping changes: the newest one wins and the older is dropped.
+  const c1 = applyFsEventToState(state, 'change', file);
+  writeFile(file, '# Alpha\n[[Gamma]]\n');
+  const c2 = applyFsEventToState(state, 'change', file);
+  const [r1, r2] = await Promise.all([c1, c2]);
+  assert(r1 === false && r2 === true, `expected only the newest change to apply, got ${r1}/${r2}`);
+  assert(state.entries.get(file).wikilinks[0] === 'Gamma', 'expected the newest parse to be kept');
+  assert(state.fsPending.size === 0, 'pending map must not leak finished paths');
+  // A plain sequential add still works.
+  fs.rmSync(file);
+  await applyFsEventToState(state, 'unlink', file);
+  writeFile(file, '# Alpha again\n');
+  assert((await applyFsEventToState(state, 'add', file)) === true && state.entries.has(file), 'a fresh add must apply');
+}
+
+async function runServerHardening(tmpRoot) {
+  // Host parsing: bracketed IPv6 with and without a port; empty/malformed rejected.
+  assert(isTrustedHost('[::1]:3000') && isTrustedHost('[::1]'), 'bracketed IPv6 loopback must be trusted');
+  assert(isTrustedHost('LOCALHOST:3000') && isTrustedHost('127.0.0.1'), 'localhost/127.0.0.1 must be trusted');
+  for (const bad of ['', '  ', '::1', '[::1', '[::1]x', '[::2]:3000', 'evil.example:3000', '127.0.0.1:abc', ':3000']) {
+    assert(!isTrustedHost(bad), `Host ${JSON.stringify(bad)} must not be trusted`);
+  }
+  assert(isJsonContentType('application/json; charset=utf-8') && isJsonContentType('Application/JSON'), 'JSON with parameters must be accepted');
+  assert(!isJsonContentType('application/jsonp') && !isJsonContentType('text/plain') && !isJsonContentType(undefined), 'non-JSON must be rejected');
+
+  const vaultDir = path.join(tmpRoot, 'hardening-vault');
+  writeFile(path.join(vaultDir, 'A.md'), '# A\nSome body text that is long enough for an excerpt.\n');
+  const configPath = path.join(tmpRoot, 'hardening', 'config.json');
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  writeJson(configPath, { vaultPath: vaultDir, port: 4322 });
+  const state = {
+    cfg: sanitizePersistedConfig({ vaultPath: vaultDir, port: 4322 }),
+    configPath,
+    outPath: path.join(tmpRoot, 'hardening', 'graph.json'),
+    entries: await scanVaultEntries(vaultDir)
+  };
+  await rebuildGraphState(state);
+  const handler = createRequestHandler(state);
+  const host = { host: '127.0.0.1:4322' };
+  const jsonHost = { ...host, 'content-type': 'application/json' };
+
+  const emptyHost = await runHandler(handler, 'GET', '/api/tags', undefined, { host: '' });
+  assert(emptyHost.statusCode === 403, `an empty Host header must be refused, got ${emptyHost.statusCode}`);
+  const v6 = await runHandler(handler, 'GET', '/api/tags', undefined, { host: '[::1]:4322' });
+  assert(v6.statusCode === 200, `a [::1] Host header must be accepted, got ${v6.statusCode}`);
+
+  // Content-Type with a charset parameter.
+  const charset = await runHandler(handler, 'POST', '/api/config', JSON.stringify({ hubLabels: true }),
+    { ...host, 'content-type': 'application/json; charset=utf-8' });
+  assert(charset.statusCode === 200, `JSON with charset must be accepted, got ${charset.statusCode} ${charset.body}`);
+
+  // A hand edit of config.json not yet applied (debounced watcher) survives a POST.
+  const onDisk = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  writeJson(configPath, { ...onDisk, accent: '#123456' });
+  const merged = JSON.parse((await runHandler(handler, 'POST', '/api/config', JSON.stringify({ zoom: 1.5 }), jsonHost)).body);
+  assert(merged.accent === '#123456' && merged.zoom === 1.5 && merged.hubLabels === true,
+    `POST must merge onto the on-disk config, got accent=${merged.accent} zoom=${merged.zoom}`);
+  // An invalid file on disk falls back to the in-memory config.
+  fs.writeFileSync(configPath, '{ not json');
+  const fallback = await runHandler(handler, 'POST', '/api/config', JSON.stringify({ zoom: 2 }), jsonHost);
+  assert(fallback.statusCode === 200 && JSON.parse(fallback.body).accent === '#123456', 'invalid disk config must fall back to memory');
+
+  // Frame protection on the settings page only; the wallpaper stays embeddable.
+  const settings = await runHandler(handler, 'GET', '/settings.html', undefined, host);
+  assert(settings.statusCode === 200, 'settings.html must be served');
+  assert(/frame-ancestors 'self'/.test(settings.headers['Content-Security-Policy'] || ''), 'settings.html needs frame-ancestors \'self\'');
+  assert(settings.headers['X-Frame-Options'] === 'SAMEORIGIN', 'settings.html needs X-Frame-Options: SAMEORIGIN');
+  const wallpaper = await runHandler(handler, 'GET', '/', undefined, host);
+  assert(wallpaper.statusCode === 200 && !wallpaper.headers['X-Frame-Options'], 'index.html must stay frameable by wallpaper hosts');
+
+  // Note of the hour: the sorted list is cached per graph version.
+  await runHandler(handler, 'GET', '/api/note-of-hour?hour=1', undefined, host);
+  const cached = state.noteOfHourCache && state.noteOfHourCache.sorted;
+  await runHandler(handler, 'GET', '/api/note-of-hour?hour=2', undefined, host);
+  assert(cached && state.noteOfHourCache.sorted === cached, 'note-of-hour must reuse the sorted list within a graph version');
+
+  // Custom presets: sanitized on read, capped, and vault-specific keys dropped.
+  const presetsFile = path.join(path.dirname(configPath), 'custom-presets.json');
+  const many = Array.from({ length: MAX_CUSTOM_PRESETS + 5 }, (_, i) => ({ name: `P${i}`, config: { zoom: 1 } }));
+  writeJson(presetsFile, [
+    null, 'junk', { name: '' }, { name: 'x'.repeat(61) },
+    { name: 'Keep', config: { accent: '#abcdef', focusNote: 'Secret', tagColors: { a: '#000000' }, ignorePaths: ['x'], theme: 'nope', bogus: 1 } },
+    { name: 'Keep', config: {} },
+    ...many
+  ]);
+  const read = JSON.parse((await runHandler(handler, 'GET', '/api/custom-presets', undefined, host)).body);
+  assert(read.length === MAX_CUSTOM_PRESETS, `expected the list capped at ${MAX_CUSTOM_PRESETS}, got ${read.length}`);
+  assert(read[0].name === 'Keep' && read.filter(p => p.name === 'Keep').length === 1, 'bad entries dropped, duplicate names collapsed');
+  assert(JSON.stringify(read[0].config) === JSON.stringify({ accent: '#abcdef' }), `bad/vault-specific keys must be dropped, got ${JSON.stringify(read[0].config)}`);
+  assert(read[0].accent === '#abcdef', 'preset swatch must follow its config');
+  const full = await runHandler(handler, 'POST', '/api/custom-presets', JSON.stringify({ name: 'One more', config: {} }), jsonHost);
+  assert(full.statusCode === 400 && /too many/.test(JSON.parse(full.body).error), `expected the cap to refuse a new preset, got ${full.statusCode}`);
+  const replace = await runHandler(handler, 'POST', '/api/custom-presets', JSON.stringify({ name: 'Keep', config: { focusNote: 'Secret', zoom: 2 } }), jsonHost);
+  assert(replace.statusCode === 200, `replacing an existing preset must work at the cap, got ${replace.statusCode} ${replace.body}`);
+  const replaced = JSON.parse(replace.body).find(p => p.name === 'Keep');
+  assert(replaced && replaced.config.zoom === 2 && !('focusNote' in replaced.config), 'focusNote must not be stored in a preset');
+  assert(sanitizeCustomPresets({}).length === 0, 'a non-array presets file reads as empty');
+
+  // 413 over a real socket: the client must see the status, not a reset.
+  const server = http.createServer(handler);
+  await new Promise(r => server.listen(0, '127.0.0.1', r));
+  try {
+    const port = server.address().port;
+    const status = await new Promise((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port, method: 'POST', path: '/api/config',
+        headers: { 'content-type': 'application/json', host: `127.0.0.1:${port}` } }, res => {
+        res.resume();
+        resolve(res.statusCode);
+      });
+      req.on('error', reject);
+      req.end(Buffer.alloc(3e6, 0x20));
+    });
+    assert(status === 413, `expected a 413 over a real socket, got ${status}`);
+  } finally {
+    await new Promise(r => server.close(r));
+  }
+}
+
+async function runSymlinkFollow(tmpRoot) {
+  const outside = path.join(tmpRoot, 'symlink-outside');
+  writeFile(path.join(outside, 'Linked.md'), '# Linked\n');
+  writeFile(path.join(outside, 'dir', 'InDir.md'), '# InDir\n');
+  const vaultDir = path.join(tmpRoot, 'symlink-follow-vault');
+  writeFile(path.join(vaultDir, 'Alpha.md'), '# Alpha\n');
+  try {
+    fs.symlinkSync(path.join(outside, 'Linked.md'), path.join(vaultDir, 'Linked.md'), 'file');
+    fs.symlinkSync(path.join(outside, 'dir'), path.join(vaultDir, 'linkdir'), 'dir');
+    fs.symlinkSync(path.join(outside, 'missing.md'), path.join(vaultDir, 'Broken.md'), 'file');
+  } catch (e) {
+    console.log(`note: skipping symlink-follow test (symlinks unavailable: ${e.message})`);
+    return;
+  }
+  const entries = await scanVaultEntries(vaultDir);
+  const names = Array.from(entries.values()).map(e => e.basename).sort();
+  assert(JSON.stringify(names) === JSON.stringify(['Alpha', 'InDir', 'Linked']),
+    `expected symlinked notes and folders to be scanned (broken links skipped), got [${names.join(', ')}]`);
+  // The watcher path (applyFsEventToState) treats a symlinked note the same way.
+  const state = { cfg: sanitizePersistedConfig({ vaultPath: vaultDir }), entries: new Map() };
+  assert((await applyFsEventToState(state, 'add', path.join(vaultDir, 'Linked.md'))) === true, 'the watcher must accept a symlinked note');
+}
+
 async function main() {
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'obsidian-live-wallpaper-smoke-'));
   try {
@@ -983,6 +1165,7 @@ async function main() {
     runLayoutTargets();
     runConfigValidationThrows();
     runIgnorePathsUnit();
+    runIgnorePathsNormalisation();
     runPresetsValidateAgainstSchema();
     runConfigExampleValidatesAgainstSchema(tmpRoot);
     await runHappyPath(tmpRoot);
@@ -996,6 +1179,9 @@ async function main() {
     await runLiveWatcherWithIgnorePaths(tmpRoot);
     await runLiveWatcherDotAncestor(tmpRoot);
     await runSymlinkCycleGuard(tmpRoot);
+    await runSymlinkFollow(tmpRoot);
+    await runStaleParseDiscard(tmpRoot);
+    await runServerHardening(tmpRoot);
     await runEaddrinuse(tmpRoot);
     await runEaddrinuseOwnInstance(tmpRoot);
     await runLinkResolution(tmpRoot);
