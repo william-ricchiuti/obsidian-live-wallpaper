@@ -118,7 +118,12 @@
       const { W, H, k } = S;
       const cell = Math.max(4, Math.round(8.5 * k));
       const gw = Math.ceil(W / cell), gh = Math.ceil(H / cell);
-      const scale = K.dpr(ctx);
+      // The baked board is one full-screen bitmap. At device resolution that is
+      // ~33 MB at 1080p@2x and ~59 MB at 1440p@2x, so on high-DPI screens
+      // cap it near 4 Mpx (~16 MB) and let it upscale a little, which the
+      // quantised diode look hides. Never below CSS resolution.
+      const LAYER_MAX_PIXELS = 4e6;
+      const scale = Math.min(K.dpr(ctx), Math.max(1, Math.sqrt(LAYER_MAX_PIXELS / Math.max(1, W * H))));
       const b = K.memo('led', S, `${cell}|${gw}x${gh}|${scale}`, () => build(this, S, cell, gw, gh, scale));
       ctx.drawImage(b.layer, 0, 0, W, H);
 
