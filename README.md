@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/william-ricchiuti/obsidian-live-wallpaper/actions/workflows/ci.yml/badge.svg)](https://github.com/william-ricchiuti/obsidian-live-wallpaper/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Node](https://img.shields.io/badge/node-%E2%89%A520-43853d.svg)](https://nodejs.org)
+[![Node](https://img.shields.io/badge/node-%E2%89%A520.19-43853d.svg)](https://nodejs.org)
 
 > Turn your Obsidian vault into an ambient desktop scene instead of another hidden sidebar.
 
@@ -336,11 +336,11 @@ Big graphs turn into mush if you render everything. With `autoScaleLargeVaults` 
 | 3,000–10,000 nodes | Glow and halos off, labels tighten, depth effects back off, render scale drops to stay smooth |
 | 10,000+ nodes | Particles off, halos off, labels limited to the biggest hubs, render scale drops further, hard cap of about 2,800 rendered nodes |
 
-If you want a tighter ceiling, set `maxRenderedNodes` — least-connected notes drop first.
+If you want a tighter ceiling, set `maxRenderedNodes` — least-connected notes drop first. These limits apply to every theme, not just the default renderer.
 
 ### Incremental parsing
 
-The first launch reads your whole vault. After that, normal edits only rebuild the parts of the graph that actually changed, so quick note updates do not trigger a full vault re-scan. Rapid saves are grouped together, and the wallpaper refreshes automatically as those changes land.
+The first launch reads your whole vault. After that, normal edits only rebuild the parts of the graph that actually changed, so quick note updates do not trigger a full vault re-scan. Rapid saves are grouped together, and the wallpaper refreshes automatically as those changes land. The settled layout is saved to `layout.json` next to your config, so restarting the server, the wallpaper host or your computer brings the graph back exactly where it was instead of laying it out again.
 
 ## License
 

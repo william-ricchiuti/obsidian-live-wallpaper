@@ -4,7 +4,7 @@ Linux has no single wallpaper engine, but the parser and renderer work identical
 
 ## Prerequisites
 
-- [Node.js](https://nodejs.org) (v20+)
+- [Node.js](https://nodejs.org) (v20.19 or newer)
 - One of the wallpaper host options below
 
 ## Install
