@@ -7,8 +7,10 @@
 //      oneshot mode — catches the "silently blank frame" class of regression).
 //
 // Chrome is located cross-platform (see find-chrome.js). If no Chrome is found
-// the test SKIPS with exit 0, so `npm test` stays green on machines without a
-// browser; CI runners (which have Chrome) exercise it for real.
+// the test SKIPS with exit 0 locally, so `npm test` stays green on machines
+// without a browser. In CI (process.env.CI set) or with OLW_REQUIRE_CHROME=1 a
+// missing Chrome is a FAILURE, so a broken Chrome setup step can't silently
+// turn the render test into a no-op.
 
 const fs = require('fs');
 const os = require('os');
@@ -89,6 +91,12 @@ function buildUrl(presets, name) {
 async function main() {
   const chrome = findChrome();
   if (!chrome) {
+    const required = !!process.env.CI || process.env.OLW_REQUIRE_CHROME === '1';
+    if (required) {
+      console.error('smoke:render FAILED — no Chrome/Chromium found but one is required ' +
+        `(${process.env.CI ? 'CI is set' : 'OLW_REQUIRE_CHROME=1'}); set CHROME=/path/to/chrome`);
+      process.exit(1);
+    }
     log('smoke:render skipped — no Chrome/Chromium found (set CHROME=/path/to/chrome to enable)');
     return;
   }

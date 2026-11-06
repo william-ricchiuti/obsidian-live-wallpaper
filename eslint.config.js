@@ -1,10 +1,20 @@
 'use strict';
 
-// Flat config (ESLint 9+). Scoped to plain .js files — index.html/settings.html
-// inline <script> blocks aren't linted (would need eslint-plugin-html; not worth
-// the extra dependency for a couple of small inline scripts).
+// Flat config (ESLint 9+). `npm run lint` covers the plain .js files.
+// The inline <script> blocks in index.html/settings.html are linted separately
+// via eslint-plugin-html with `npm run lint:html` (not yet part of `lint` /
+// prepublishOnly while the existing findings are worked down).
 const js = require('@eslint/js');
 const globals = require('globals');
+const html = require('eslint-plugin-html');
+
+// Globals published by renderer-core.js: in the browser it Object.assign()s its
+// api onto window (see the bottom of that file), so index.html uses them bare.
+const rendererCoreGlobals = Object.fromEntries([
+  'clamp', 'truncateLabel', 'mixChannel', 'hashStr', 'hslToHex', 'graphHashFast', 'graphHashSlow',
+  'PALETTES', 'hexToRgb', 'rgbToHex', 'mixHex', 'luminance', 'contrastRatio', 'ensureContrast',
+  'timeOfDayTint', 'isDaytime', 'flowOffset', 'dayKey', 'configValueEqual'
+].map(name => [name, 'readonly']));
 
 // - ignoreRestSiblings: buildSafeConfig(cfg) does `const { vaultPath, port,
 //   ...safe } = cfg` specifically to exclude those keys from the rest object;
@@ -73,5 +83,30 @@ module.exports = [
       }
     },
     rules: sharedRules
+  },
+  {
+    // Inline <script> blocks in the two pages (classic scripts, browser only).
+    files: ['index.html', 'settings.html'],
+    plugins: { html },
+    languageOptions: { ecmaVersion: 2022, sourceType: 'script', globals: { ...globals.browser } },
+    rules: sharedRules
+  },
+  {
+    // index.html loads, in order: vendor/d3, renderer-core.js, layout-core.js,
+    // gl-renderer.js, themes/registry.js, themes/_scenekit.js, then its inline
+    // script; theme files are injected later and register on THEMES. Its
+    // top-level bindings are globals the hook-style themes read (cfg, nodes,
+    // __cullFrame, ...), so only function-local unused vars are reported.
+    files: ['index.html'],
+    languageOptions: {
+      globals: {
+        ...rendererCoreGlobals,
+        d3: 'readonly', LayoutCore: 'readonly', GLRenderer: 'readonly',
+        THEMES: 'writable', SceneKit: 'readonly'
+      }
+    },
+    rules: {
+      'no-unused-vars': ['error', { vars: 'local', argsIgnorePattern: '^_', caughtErrors: 'none', ignoreRestSiblings: true }]
+    }
   }
 ];

@@ -29,8 +29,6 @@
     "windows-setup.md",
     "vendor/",
     "themes/",
-    "scripts/find-chrome.js",
-    "scripts/screenshot-presets.js",
     "docs/presets/"
   ],
   "keywords": [
@@ -52,10 +50,11 @@
     "smoke:render": "node scripts/smoke-render.js",
     "test": "npm run smoke && npm run smoke:render",
     "lint": "eslint parser.js bin/cli.js worker.js renderer-core.js layout-core.js gl-renderer.js themes/*.js scripts/*.js eslint.config.js",
+    "lint:html": "eslint index.html settings.html",
     "prepublishOnly": "npm run lint && npm test"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=20.19.0"
   },
   "license": "MIT",
   "dependencies": {
@@ -63,7 +62,8 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "eslint": "^10.6.0",
-    "globals": "^17.7.0"
+    "eslint": "^10.14.0",
+    "eslint-plugin-html": "^8.2.1",
+    "globals": "^17.14.0"
   }
 }
