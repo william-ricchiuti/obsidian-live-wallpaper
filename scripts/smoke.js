@@ -1,4 +1,5 @@
 const fs = require('fs');
+const http = require('http');
 const net = require('net');
 const os = require('os');
 const path = require('path');
@@ -18,11 +19,35 @@ const {
   extractWikilinks,
   noteExcerpt,
   isIgnoredPath,
+  isTrustedHost,
+  isJsonContentType,
+  sanitizeCustomPresets,
+  MAX_CUSTOM_PRESETS,
   startApp,
+  validatePluginGraph,
+  materializePluginGraph,
+  validatePluginActive,
+  chooseGraphSource,
+  pluginDir,
+  PLUGIN_ID,
   DEFAULTS,
   THEME_LIST
 } = require('../parser.js');
+const BridgePlugin = require('../obsidian-plugin/main.js');
 const core = require('../renderer-core.js');
+
+// A port nobody else holds right now. Fixed ports let a second copy of the app
+// (another checkout's test run, a running wallpaper) answer instead, and the
+// server's "already running" path then exits 0: a silent false pass.
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.unref();
+    srv.on('error', reject);
+    srv.listen(0, '127.0.0.1', () => { const { port } = srv.address(); srv.close(() => resolve(port)); });
+  });
+}
+
 const layoutCore = require('../layout-core.js');
 
 function assert(condition, message) {
@@ -190,9 +215,11 @@ async function runDuplicateBasenames(tmpRoot) {
   assert(betaIds.length === 2, `expected 2 Beta nodes, got ${betaIds.length}`);
   assert(betaIds.every(id => id.includes('/')), 'expected duplicate basenames to use folder/basename IDs');
 
-  // [[Beta]] in Alpha.md should link to BOTH Betas
+  // [[Beta]] in Alpha.md links to ONE Beta: the one in Alpha's own folder
+  // (the vault root), not both.
   const alphaLinks = result.links.filter(l => l.source === 'Alpha');
-  assert(alphaLinks.length === 2, `expected Alpha to link to both Betas, got ${alphaLinks.length} links`);
+  assert(alphaLinks.length === 1 && alphaLinks[0].target === './Beta',
+    `expected Alpha to link only to ./Beta, got ${JSON.stringify(alphaLinks)}`);
 
   // Both Betas link back to Alpha
   const betaToAlpha = result.links.filter(l => l.target === 'Alpha' && l.source !== 'Alpha');
@@ -518,6 +545,57 @@ async function runIgnorePathsIntegration(tmpRoot) {
     `expected only Alpha to survive ignorePaths filtering, got [${basenames.join(', ')}]`);
 }
 
+// A vault that lives under a dot-folder (~/.vaults/x) must still live-update,
+// while dot-folders *inside* the vault (.obsidian, .trash) stay ignored.
+async function runLiveWatcherDotAncestor(tmpRoot) {
+  const vaultDir = path.join(tmpRoot, '.hidden-parent', 'vault');
+  writeFile(path.join(vaultDir, 'Alpha.md'), '# Alpha\n');
+  fs.mkdirSync(path.join(vaultDir, '.obsidian'), { recursive: true });
+  const configPath = path.join(tmpRoot, 'dotparent-config.json');
+  writeJson(configPath, { vaultPath: vaultDir, port: await freePort() });
+  const app = await startApp({ configPath, outPath: path.join(tmpRoot, 'dotparent-graph.json') });
+  const waitForVersion = async (above, timeoutMs) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (app.state.graphVersion > above) return true;
+      await new Promise(r => setTimeout(r, 100));
+    }
+    return false;
+  };
+  try {
+    await new Promise((resolve, reject) => {
+      app.watcher.once('ready', resolve);
+      setTimeout(() => reject(new Error('watcher never became ready')), 5000);
+    });
+    await new Promise(r => setTimeout(r, 300));
+    let before = app.state.graphVersion;
+    writeFile(path.join(vaultDir, 'Beta.md'), '# Beta\n[[Alpha]]\n');
+    assert(await waitForVersion(before, 4000), 'expected live updates for a vault under a dot-folder');
+    before = app.state.graphVersion;
+    writeFile(path.join(vaultDir, '.obsidian', 'Hidden.md'), '# Hidden\n');
+    assert(!(await waitForVersion(before, 1200)), 'expected dot-folders inside the vault to stay ignored');
+
+    // Two overlapping ignorePaths rescans run one after the other and leave
+    // exactly one live watcher behind.
+    await Promise.all([app.state.onIgnorePathsChanged(), app.state.onIgnorePathsChanged()]);
+    await new Promise((resolve, reject) => {
+      app.watcher.once('ready', resolve);
+      setTimeout(() => reject(new Error('watcher never became ready after rescans')), 5000);
+    });
+    await new Promise(r => setTimeout(r, 300));
+    before = app.state.graphVersion;
+    writeFile(path.join(vaultDir, 'Gamma.md'), '# Gamma\n');
+    assert(await waitForVersion(before, 4000), 'expected live updates to keep working after overlapping rescans');
+  } finally {
+    process.removeAllListeners('SIGINT');
+    process.removeAllListeners('SIGTERM');
+    await app.watcher.close();
+    await app.configWatcher.close();
+    await app.pluginWatcher.close();
+    await new Promise(r => app.server.close(r));
+  }
+}
+
 // Exercises the real chokidar watcher (not just applyFsEventToState): with a
 // non-empty ignorePaths, the ignore callback used to fire on the vault root
 // itself and silently disable every live update. Also covers directories with
@@ -528,7 +606,7 @@ async function runLiveWatcherWithIgnorePaths(tmpRoot) {
   writeFile(path.join(vaultDir, 'templates', 'Template.md'), '# Template\n');
   fs.mkdirSync(path.join(vaultDir, 'notes.v2'), { recursive: true });
   const configPath = path.join(tmpRoot, 'live-config.json');
-  writeJson(configPath, { vaultPath: vaultDir, port: 3998, ignorePaths: ['templates', '.obsidian'] });
+  writeJson(configPath, { vaultPath: vaultDir, port: await freePort(), ignorePaths: ['templates', '.obsidian'] });
 
   const app = await startApp({ configPath, outPath: path.join(tmpRoot, 'live-graph.json') });
   const waitForVersion = async (above, timeoutMs) => {
@@ -568,6 +646,7 @@ async function runLiveWatcherWithIgnorePaths(tmpRoot) {
     process.removeAllListeners('SIGTERM');
     await app.watcher.close();
     await app.configWatcher.close();
+    await app.pluginWatcher.close();
     await new Promise(r => app.server.close(r));
   }
 }
@@ -622,6 +701,37 @@ async function runEaddrinuse(tmpRoot) {
 
   assert(exitCode === 1, `expected the child process to exit(1) on EADDRINUSE, got ${exitCode}`);
   assert(/already in use/.test(stderr), `expected an "already in use" message on stderr, got: ${stderr}`);
+  // npm start doesn't parse --port, so the hint must not suggest it there.
+  assert(!/--port/.test(stderr), `expected no --port hint outside the CLI, got: ${stderr}`);
+}
+
+// A second launch while our own server holds the port exits 0 with a note,
+// instead of failing (launchd/Task Scheduler + a manual start is common).
+async function runEaddrinuseOwnInstance(tmpRoot) {
+  const fake = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ app: 'obsidian-live-wallpaper', graphVersion: 1, configVersion: 1 }));
+  });
+  const port = await new Promise(resolve => fake.listen(0, '127.0.0.1', () => resolve(fake.address().port)));
+  try {
+    const vaultDir = path.join(tmpRoot, 'eaddrinuse-own-vault');
+    writeFile(path.join(vaultDir, 'A.md'), '# A\n');
+    const configPath = path.join(tmpRoot, 'eaddrinuse-own-config.json');
+    writeJson(configPath, { vaultPath: vaultDir, port });
+    const child = spawn(process.execPath, [
+      '-e',
+      "require(process.argv[1]).startApp({ configPath: process.argv[2] }).catch(() => {});",
+      path.join(__dirname, '..', 'parser.js'),
+      configPath
+    ]);
+    let stdout = '';
+    child.stdout.on('data', chunk => { stdout += chunk; });
+    const exitCode = await new Promise(resolve => child.on('exit', resolve));
+    assert(exitCode === 0, `expected exit(0) when our own instance holds the port, got ${exitCode}`);
+    assert(/already running/.test(stdout), `expected an "already running" note, got: ${stdout}`);
+  } finally {
+    fake.close();
+  }
 }
 
 function runRendererCore() {
@@ -715,8 +825,335 @@ function runNewParserFeatures() {
   // Attachments and embeds of non-notes are not links; .md suffix is stripped.
   assert(extractWikilinks('![[photo.png]] [[scan.pdf]] ![[Other Note]] [[Note.md]]').join('|') === 'Other Note|Note',
     `expected attachments skipped and .md stripped, got ${extractWikilinks('![[photo.png]] [[scan.pdf]] ![[Other Note]] [[Note.md]]').join('|')}`);
+  // Parity with Obsidian: nothing inside code counts.
+  const code = 'real [[A]] #keep\n```\n[[InFence]] #nope\n```\n~~~js\n[[Tilde]]\n~~~\ninline `[[Inline]] #nope2` done\n';
+  assert(extractWikilinks(code).join('|') === 'A', `code links ignored, got ${extractWikilinks(code).join('|')}`);
+  assert(extractTags(code).join('|') === 'keep', `code tags ignored, got ${extractTags(code).join('|')}`);
+  assert(extractWikilinks('```\n[[Unclosed]]\nstill code').length === 0, 'an unclosed fence runs to the end');
+  // Markdown links to notes count; URLs, headings and attachments don't.
+  const md = '[a](Note%20One.md) [b](<Folder/Two.md>) [c](../Three.md#Part "t") [d](https://x.com/y.md) [e](#local) ![f](pic.png) [g](Four)';
+  assert(extractWikilinks(md).join('|') === 'Note One|Folder/Two|Three|Four', `markdown links, got ${extractWikilinks(md).join('|')}`);
+  // Tags: any letter, digits allowed if not all digits, tag:/string forms.
+  assert(extractTags('x #café #日本 #2024-review #2024 #y1984').join('|') === 'café|日本|2024-review|y1984',
+    `unicode/digit tags, got ${extractTags('x #café #日本 #2024-review #2024 #y1984').join('|')}`);
+  assert(extractTags('---\ntag: solo\n---\n').join('|') === 'solo', 'singular tag: key');
+  assert(extractTags('---\ntags: a, b c\n---\n').join('|') === 'a|b|c', `string tags, got ${extractTags('---\ntags: a, b c\n---\n').join('|')}`);
+  assert(extractTags('heading\n# Title\n').length === 0, 'a heading is not a tag');
   const ex = noteExcerpt('---\ntags: [x]\n---\n# Title\nSome **bold** text with [[Link|alias]] and [web](http://x).\n');
   assert(/Some bold text with alias and web/.test(ex), `noteExcerpt strips markdown, got: ${ex}`);
+}
+
+// A bare [[Note]] matching several notes picks one: same folder as the
+// source, then the shortest vault-relative path, then alphabetical.
+async function runDuplicateBasenameResolution(tmpRoot) {
+  const dir = path.join(tmpRoot, 'dup-resolve-vault');
+  writeFile(path.join(dir, 'nested', 'Beta.md'), '# Beta nested\n');
+  writeFile(path.join(dir, 'Beta.md'), '# Beta root\n');
+  writeFile(path.join(dir, 'nested', 'Src.md'), '[[Beta]]\n');
+  writeFile(path.join(dir, 'deep', 'er', 'Note.md'), 'x\n');
+  writeFile(path.join(dir, 'b', 'Note.md'), 'x\n');
+  writeFile(path.join(dir, 'c', 'Dup.md'), 'x\n');
+  writeFile(path.join(dir, 'd', 'Dup.md'), 'x\n');
+  writeFile(path.join(dir, 'x', 'Linker.md'), '[[Note]] [[Dup]] [[beta]]\n');
+  const g = materializeGraph(await scanVaultEntries(dir), dir, { showUnresolvedLinks: true });
+  const out = id => g.links.filter(l => l.source === id).map(l => l.target).sort();
+  assert(JSON.stringify(out('Src')) === JSON.stringify(['nested/Beta']), `same-folder match should win, got ${JSON.stringify(out('Src'))}`);
+  // Linker is in x/: no same-folder match, so the shortest path wins (b/Note
+  // over deep/er/Note, ./Beta over nested/Beta) and c/Dup beats d/Dup.
+  assert(JSON.stringify(out('Linker')) === JSON.stringify(['./Beta', 'b/Note', 'c/Dup']),
+    `expected shortest-path then alphabetical picks, got ${JSON.stringify(out('Linker'))}`);
+}
+
+// Fixture metadata shaped like Obsidian's (TFile list, resolvedLinks,
+// unresolvedLinks, getAllTags output).
+function bridgeFixture() {
+  const file = (p, mtime) => ({ path: p, basename: p.slice(p.lastIndexOf('/') + 1).replace(/\.md$/, ''), extension: 'md', stat: { mtime } });
+  const files = [file('nested/Beta.md', 3000), file('Alpha.md', 1000), file('Beta.md', 2000), file('Sub/Gamma.md', 4000)];
+  const tags = {
+    'Alpha.md': ['#Project', '#idea', '#project'],
+    'Beta.md': ['#project'],
+    'nested/Beta.md': ['#IDEA', '#extra'],
+    'Sub/Gamma.md': null
+  };
+  return {
+    files,
+    resolvedLinks: {
+      'Alpha.md': { 'Beta.md': 1, 'Sub/Gamma.md': 2, 'pic.png': 1, 'Alpha.md': 1 },
+      'nested/Beta.md': { 'Alpha.md': 1 },
+      'Sub/Gamma.md': {}
+    },
+    unresolvedLinks: {
+      'Alpha.md': { Missing: 1, 'gone.png': 1 },
+      'Beta.md': { Missing: 2, 'Other.md': 1 }
+    },
+    getTags: f => tags[f.path]
+  };
+}
+
+async function runBridgePluginBuilder(tmpRoot) {
+  assert(typeof BridgePlugin === 'function', 'plugin main.js must export the plugin class');
+  assert(typeof BridgePlugin.buildPluginGraph === 'function', 'plugin main.js must expose buildPluginGraph');
+  const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'obsidian-plugin', 'manifest.json'), 'utf8'));
+  assert(manifest.id === PLUGIN_ID, 'manifest id must match the folder the server watches');
+
+  const g = BridgePlugin.buildPluginGraph(bridgeFixture());
+  const byId = new Map(g.nodes.map(n => [n.id, n]));
+  const realIds = g.nodes.filter(n => !n.ghost).map(n => n.id);
+  assert(JSON.stringify(realIds) === JSON.stringify(['Alpha', './Beta', 'Gamma', 'nested/Beta']),
+    `expected path-ordered parser-style ids, got ${JSON.stringify(realIds)}`);
+  assert(byId.get('./Beta').label === 'Beta' && byId.get('nested/Beta').label === 'Beta' && byId.get('Alpha').label === undefined,
+    'label only when the id differs from the basename');
+  assert(byId.get('Alpha').tag === 'Project' && JSON.stringify(byId.get('Alpha').tags) === JSON.stringify(['Project', 'idea']),
+    `Alpha tags: ${JSON.stringify(byId.get('Alpha'))}`);
+  assert(byId.get('./Beta').tag === 'Project' && byId.get('./Beta').tags === undefined, 'case variants merge to the first spelling in path order');
+  assert(JSON.stringify(byId.get('nested/Beta').tags) === JSON.stringify(['idea', 'extra']), `nested/Beta tags: ${JSON.stringify(byId.get('nested/Beta').tags)}`);
+  assert(byId.get('Gamma').tag === undefined, 'a note without tags has no tag');
+  assert(byId.get('Gamma').folder === 'Sub' && byId.get('Alpha').folder === undefined, 'folder is the top-level folder');
+  assert(byId.get('nested/Beta').path === 'nested/Beta.md' && byId.get('Alpha').mtime === 1000, 'path and mtime carried');
+  const ghosts = g.nodes.filter(n => n.ghost).map(n => n.id).sort();
+  assert(JSON.stringify(ghosts) === JSON.stringify(['Missing', 'Other']), `expected ghosts Missing and Other (no attachment ghosts), got ${JSON.stringify(ghosts)}`);
+  assert(g.nodes.filter(n => n.ghost).every(n => n.path === undefined), 'ghosts carry no path');
+  const links = g.links.map(l => l.source + '>' + l.target).sort();
+  assert(JSON.stringify(links) === JSON.stringify(['./Beta>Missing', './Beta>Other', 'Alpha>./Beta', 'Alpha>Gamma', 'Alpha>Missing', 'nested/Beta>Alpha']),
+    `unexpected links ${JSON.stringify(links)}`);
+
+  // Same vault on disk: the plugin's ids match the scan's, so the saved
+  // layout stays valid when the source switches.
+  const dir = path.join(tmpRoot, 'bridge-ids-vault');
+  for (const f of bridgeFixture().files) writeFile(path.join(dir, f.path), 'x\n');
+  const scan = materializeGraph(await scanVaultEntries(dir), dir, {});
+  const scanIds = scan.nodes.map(n => n.id).sort();
+  const pluginIds = realIds.slice().sort();
+  assert(JSON.stringify(scanIds) === JSON.stringify(pluginIds), `plugin ids ${JSON.stringify(pluginIds)} differ from scan ids ${JSON.stringify(scanIds)}`);
+
+  // The plugin class writes through the vault adapter.
+  const written = {};
+  const app = {
+    vault: {
+      configDir: '.obsidian',
+      getMarkdownFiles: () => bridgeFixture().files,
+      adapter: { exists: async () => true, mkdir: async () => {}, write: async (p, d) => { written[p] = d; } },
+      on: () => ({})
+    },
+    metadataCache: { resolvedLinks: bridgeFixture().resolvedLinks, unresolvedLinks: {}, getFileCache: () => null, on: () => ({}) },
+    workspace: { onLayoutReady: () => {}, on: () => ({}), getActiveFile: () => bridgeFixture().files[0] }
+  };
+  const plugin = new BridgePlugin(app, { id: PLUGIN_ID, dir: '.obsidian/plugins/live-wallpaper-bridge' });
+  plugin.onload();
+  await plugin.writeGraph();
+  await plugin.writeActive();
+  plugin.onunload();
+  const gj = JSON.parse(written['.obsidian/plugins/live-wallpaper-bridge/graph.json']);
+  assert(gj.schema === 1 && gj.source === 'obsidian' && gj.generatedAt > 0 && gj.nodes.length === 4, 'plugin writes a schema-1 graph.json');
+  assert(validatePluginGraph(gj).nodes.length === 4, 'the server accepts what the plugin writes');
+  const aj = JSON.parse(written['.obsidian/plugins/live-wallpaper-bridge/active.json']);
+  assert(aj.id === 'nested/Beta' && aj.path === 'nested/Beta.md' && aj.at > 0, `active.json: ${JSON.stringify(aj)}`);
+}
+
+// Plugin graph vs scan selection, ignorePaths/showUnresolvedLinks applied to
+// the plugin graph, path stripped, /api/state and /api/active.
+async function runBridgeServerSelection(tmpRoot) {
+  const dir = path.join(tmpRoot, 'bridge-select-vault');
+  writeFile(path.join(dir, 'Alpha.md'), '[[Beta]]\n');
+  writeFile(path.join(dir, 'Beta.md'), '#scan\n');
+  writeFile(path.join(dir, 'templates', 'T.md'), 'x\n');
+  writeFile(path.join(dir, 'OnlyInPlugin.md'), 'x\n'); // on disk too, untagged: only the plugin graph tags it
+  const old = new Date(Date.now() - 3600e3);
+  for (const f of ['Alpha.md', 'Beta.md', path.join('templates', 'T.md')]) fs.utimesSync(path.join(dir, f), old, old);
+  const entries = await scanVaultEntries(dir, ['templates']);
+  const newest = Math.max(...Array.from(entries.values()).map(e => e.mtimeMs));
+  const raw = {
+    schema: 1, generatedAt: newest + 1000, source: 'obsidian',
+    nodes: [
+      { id: 'Alpha', path: 'Alpha.md', tag: 'plug', mtime: 5 },
+      { id: 'Beta', path: 'Beta.md' },
+      { id: 'OnlyInPlugin', path: 'OnlyInPlugin.md' },
+      { id: 'T', path: 'templates/T.md', tag: 'tpl' },
+      { id: 'Missing', ghost: true },
+      { id: 'FromTemplateOnly', ghost: true },
+      { id: 'bad' }, // no path: dropped
+      42
+    ],
+    links: [
+      { source: 'Alpha', target: 'Beta' }, { source: 'Alpha', target: 'Missing' },
+      { source: 'T', target: 'FromTemplateOnly' }, { source: 'T', target: 'Alpha' },
+      { source: 'Alpha', target: 'nowhere' }
+    ]
+  };
+  const pluginGraph = validatePluginGraph(raw);
+  assert(pluginGraph.nodes.length === 6 && pluginGraph.links.length === 4, 'malformed plugin nodes/links are dropped');
+  const state = {
+    cfg: sanitizePersistedConfig({ vaultPath: dir, ignorePaths: ['templates'] }),
+    entries,
+    pluginGraph,
+    pluginActiveRaw: validatePluginActive({ path: 'templates/T.md', id: 'T', at: 1 })
+  };
+  const handler = createRequestHandler(state);
+  await rebuildGraphState(state);
+  assert(state.liveGraphSource === 'obsidian', 'auto uses a fresh plugin graph');
+  const served = JSON.parse(state.graphJson);
+  const ids = served.nodes.map(n => n.id).sort();
+  assert(JSON.stringify(ids) === JSON.stringify(['Alpha', 'Beta', 'Missing', 'OnlyInPlugin']), `ignorePaths applied to the plugin graph, got ${JSON.stringify(ids)}`);
+  assert(served.nodes.every(n => n.path === undefined), 'path is stripped before serving');
+  assert(served.links.length === 2, `links to/from ignored notes dropped, got ${JSON.stringify(served.links)}`);
+  assert(state.discoveredTags.plug === 1 && !state.discoveredTags.tpl && !state.discoveredTags.scan,
+    `discoveredTags come from the plugin graph, got ${JSON.stringify(state.discoveredTags)}`);
+  let st = JSON.parse((await runHandler(handler, 'GET', '/api/state')).body);
+  assert(st.graphSource === 'obsidian' && st.plugin.found === true, `/api/state should report the plugin source, got ${JSON.stringify(st)}`);
+  const active = JSON.parse((await runHandler(handler, 'GET', '/api/active')).body);
+  assert(active.id === null && active.path === 'templates/T.md', 'an active note under ignorePaths has no id');
+
+  state.cfg = { ...state.cfg, showUnresolvedLinks: false };
+  await rebuildGraphState(state);
+  assert(!JSON.parse(state.graphJson).nodes.some(n => n.ghost), 'showUnresolvedLinks false drops plugin ghosts');
+
+  // A note edited after the plugin's last write: the scan wins...
+  const now = Date.now();
+  const stale = { ...pluginGraph, generatedAt: now - 60e3 };
+  // Scan entries that mirror the plugin's notes on disk, all with one mtime.
+  const onDisk = mtimeMs => new Map(pluginGraph.nodes.filter(n => !n.ghost && n.path).map(n => [path.join(dir, n.path), { mtimeMs }]));
+  const edited = onDisk(now - 10e3);
+  let pick = chooseGraphSource({ cfg: { graphSource: 'auto', vaultPath: dir }, entries: edited, pluginGraph: stale }, now);
+  assert(pick.source === 'scan', 'auto falls back to the scan when a note is newer than the plugin graph');
+  // ...unless the plugin graph is live and the edit is seconds old (grace).
+  const justNow = onDisk(now - 1000);
+  pick = chooseGraphSource({ cfg: { graphSource: 'auto', vaultPath: dir }, entries: justNow, pluginGraph: stale, liveGraphSource: 'obsidian' }, now);
+  assert(pick.source === 'obsidian' && pick.recheckInMs > 0, 'a live plugin graph gets a short grace period after an edit');
+  pick = chooseGraphSource({ cfg: { graphSource: 'auto', vaultPath: dir }, entries: edited, pluginGraph: { ...stale, generatedAt: now - 11e3 } }, now);
+  assert(pick.source === 'obsidian', 'within the 2 s slack the plugin graph counts as fresh');
+  // A note deleted (or added) while Obsidian was closed leaves no newer mtime
+  // behind; the note sets differing is what makes the plugin graph stale.
+  const deleted = onDisk(now - 60e3);
+  deleted.delete(path.join(dir, 'Beta.md'));
+  pick = chooseGraphSource({ cfg: { graphSource: 'auto', vaultPath: dir }, entries: deleted, pluginGraph: { ...stale, generatedAt: now } }, now);
+  assert(pick.source === 'scan', 'auto falls back to the scan when a note was deleted outside Obsidian');
+  const added = onDisk(now - 60e3);
+  added.set(path.join(dir, 'New.md'), { mtimeMs: now - 60e3 });
+  pick = chooseGraphSource({ cfg: { graphSource: 'auto', vaultPath: dir }, entries: added, pluginGraph: { ...stale, generatedAt: now } }, now);
+  assert(pick.source === 'scan', 'auto falls back to the scan when the plugin is missing a note on disk');
+  pick = chooseGraphSource({ cfg: { graphSource: 'obsidian', vaultPath: dir }, entries: edited, pluginGraph: stale }, now);
+  assert(pick.source === 'obsidian', "'obsidian' uses a stale plugin graph");
+  pick = chooseGraphSource({ cfg: { graphSource: 'scan', vaultPath: dir }, entries: edited, pluginGraph: { ...stale, generatedAt: now } }, now);
+  assert(pick.source === 'scan', "'scan' never uses the plugin graph");
+  pick = chooseGraphSource({ cfg: { graphSource: 'obsidian', vaultPath: dir }, entries: edited, pluginGraph: null }, now);
+  assert(pick.source === 'scan', 'no plugin graph means the scan');
+
+  state.cfg = { ...state.cfg, graphSource: 'scan', showUnresolvedLinks: true };
+  await rebuildGraphState(state);
+  assert(state.liveGraphSource === 'scan' && !JSON.parse(state.graphJson).nodes.some(n => n.tag === 'plug'), "'scan' serves the scanned graph");
+  st = JSON.parse((await runHandler(handler, 'GET', '/api/state')).body);
+  assert(st.graphSource === 'scan', '/api/state reports the scan');
+
+  // Invalid plugin files are rejected.
+  const bad = [
+    { ...raw, schema: 2 },
+    { ...raw, generatedAt: 'now' },
+    { ...raw, nodes: 'x' },
+    { schema: 1, generatedAt: 1, nodes: new Array(200001).fill(null), links: [] },
+    []
+  ];
+  for (const b of bad) {
+    let threw = false;
+    try { validatePluginGraph(b); } catch (_) { threw = true; }
+    assert(threw, `expected an invalid plugin graph to be rejected: ${JSON.stringify(b).slice(0, 60)}`);
+  }
+  let threw = false;
+  try { validatePluginActive({ id: 5 }); } catch (_) { threw = true; }
+  assert(threw, 'an invalid active.json is rejected');
+  assert(materializePluginGraph({ nodes: [], links: [] }, dir, {}).nodes.length === 0, 'an empty plugin graph materializes');
+}
+
+// End to end through the real watcher: an invalid plugin file is ignored, a
+// valid one takes over, active.json reaches /api/active and an SSE 'active'
+// event, and deleting graph.json falls back to the scan.
+async function runBridgeLiveWatcher(tmpRoot) {
+  const vaultDir = path.join(tmpRoot, 'bridge-live-vault');
+  writeFile(path.join(vaultDir, 'Alpha.md'), '# Alpha\n');
+  const old = new Date(Date.now() - 3600e3);
+  fs.utimesSync(path.join(vaultDir, 'Alpha.md'), old, old);
+  const pdir = pluginDir(vaultDir);
+  fs.mkdirSync(pdir, { recursive: true });
+  writeJson(path.join(pdir, 'graph.json'), { schema: 99, generatedAt: Date.now(), nodes: [], links: [] });
+  const configPath = path.join(tmpRoot, 'bridge-live-config.json');
+  const port = await freePort();
+  writeJson(configPath, { vaultPath: vaultDir, port });
+  const app = await startApp({ configPath, outPath: path.join(tmpRoot, 'bridge-live-graph.json') });
+  const waitFor = async (cond, timeoutMs) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (cond()) return true;
+      await new Promise(r => setTimeout(r, 100));
+    }
+    return cond();
+  };
+  const get = p => new Promise((resolve, reject) => {
+    http.get({ host: '127.0.0.1', port, path: p }, res => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', c => { body += c; });
+      res.on('end', () => { try { resolve(JSON.parse(body)); } catch (e) { reject(e); } });
+    }).on('error', reject);
+  });
+  let sseReq = null;
+  try {
+    // The server may still be binding; wait until it answers.
+    assert(await waitFor(() => app.server.listening, 3000), 'server never started listening');
+    assert(app.state.liveGraphSource === 'scan', 'an invalid plugin graph.json is ignored');
+    await Promise.race([
+      app.pluginWatcherReady,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('plugin watcher never became ready')), 5000))
+    ]);
+    await new Promise(r => setTimeout(r, 300));
+
+    writeJson(path.join(pdir, 'graph.json'), {
+      schema: 1, generatedAt: Date.now(), source: 'obsidian',
+      // Same notes as on disk (Obsidian only indexes real files); the tag marks
+      // which source is being served.
+      nodes: [{ id: 'Alpha', path: 'Alpha.md', tag: 'fromplugin' }],
+      links: []
+    });
+    assert(await waitFor(() => app.state.liveGraphSource === 'obsidian', 5000), 'a valid plugin graph.json is picked up by the watcher');
+    const graph = await get('/graph.json');
+    assert(graph.nodes.some(n => n.tag === 'fromplugin') && graph.nodes.every(n => n.path === undefined), 'the plugin graph is served without paths');
+    assert((await get('/api/state')).graphSource === 'obsidian', '/api/state reports obsidian');
+
+    const events = [];
+    await new Promise((resolve, reject) => {
+      sseReq = http.get({ host: '127.0.0.1', port, path: '/events' }, res => {
+        res.setEncoding('utf8');
+        let buf = '';
+        res.on('data', c => {
+          buf += c;
+          let i;
+          while ((i = buf.indexOf('\n\n')) >= 0) {
+            const block = buf.slice(0, i);
+            buf = buf.slice(i + 2);
+            const ev = (block.match(/^event: (.*)$/m) || [])[1];
+            const data = (block.match(/^data: (.*)$/m) || [])[1];
+            events.push({ ev, data: data ? JSON.parse(data) : null });
+            if (ev === 'hello') resolve();
+          }
+        });
+      });
+      sseReq.on('error', reject);
+    });
+    writeJson(path.join(pdir, 'active.json'), { path: 'Alpha.md', id: 'Alpha', at: Date.now() });
+    assert(await waitFor(() => events.some(e => e.ev === 'active' && e.data && e.data.id === 'Alpha'), 5000), 'an SSE active event follows active.json');
+    const active = await get('/api/active');
+    assert(active.id === 'Alpha' && active.path === 'Alpha.md', `/api/active serves the open note, got ${JSON.stringify(active)}`);
+
+    fs.unlinkSync(path.join(pdir, 'graph.json'));
+    assert(await waitFor(() => app.state.liveGraphSource === 'scan', 5000), 'deleting the plugin graph falls back to the scan');
+  } finally {
+    if (sseReq) sseReq.destroy();
+    process.removeAllListeners('SIGINT');
+    process.removeAllListeners('SIGTERM');
+    for (const c of app.state.eventClients) { try { c.end(); } catch (_) {} }
+    await app.watcher.close();
+    await app.configWatcher.close();
+    await app.pluginWatcher.close();
+    await new Promise(r => app.server.close(r));
+  }
 }
 
 async function runLinkResolution(tmpRoot) {
@@ -732,6 +1169,13 @@ async function runLinkResolution(tmpRoot) {
   assert(g.discoveredTags.idea === 2 && g.discoveredTags.project === 1, `expected every tag counted, got ${JSON.stringify(g.discoveredTags)}`);
   const alpha = g.nodes.find(n => n.id === 'Alpha');
   assert(alpha.tag === 'project' && alpha.tags.length === 2, 'expected primary tag plus full tag list');
+
+  // Tags are case-insensitive across the vault; the first spelling wins.
+  const caseDir = path.join(tmpRoot, 'tagcase-vault');
+  writeFile(path.join(caseDir, 'A.md'), '#Project\n');
+  writeFile(path.join(caseDir, 'B.md'), '#project #PROJECT\n');
+  const cg = materializeGraph(await scanVaultEntries(caseDir), caseDir, {});
+  assert(JSON.stringify(cg.discoveredTags) === JSON.stringify({ Project: 2 }), `expected one merged tag, got ${JSON.stringify(cg.discoveredTags)}`);
 }
 
 function runIndexDefaultsMatchParser() {
@@ -815,6 +1259,15 @@ async function runNewRoutes(tmpRoot) {
 
   const rebinding = await runHandler(handler, 'GET', '/api/note-of-hour?hour=123', undefined, { host: 'evil.example:4321' });
   assert(rebinding.statusCode === 403, 'note-of-hour must refuse untrusted Host headers (DNS rebinding)');
+  // Reads that expose note names and tags get the same guard.
+  for (const route of ['/graph.json', '/api/tags', '/api/config', '/events']) {
+    const r = await runHandler(handler, 'GET', route, undefined, { host: 'evil.example:4321' });
+    assert(r.statusCode === 403, `${route} must refuse untrusted Host headers, got ${r.statusCode}`);
+  }
+  const okHost = await runHandler(handler, 'GET', '/api/tags', undefined, { host: 'localhost:3000' });
+  assert(okHost.statusCode === 200, `localhost Host must be accepted, got ${okHost.statusCode}`);
+  const appState = JSON.parse((await runHandler(handler, "GET", "/api/state", undefined, host)).body);
+  assert(appState.app === "obsidian-live-wallpaper", '/api/state must identify the app (used for own-instance detection)');
   const note = JSON.parse((await runHandler(handler, 'GET', '/api/note-of-hour?hour=123', undefined, host)).body);
   assert(note.title === 'Alpha' || note.title === 'Beta', `expected a note of the hour, got ${JSON.stringify(note)}`);
   assert(note.excerpt.length > 20 && !note.excerpt.includes('[['), 'expected a plain-text excerpt');
@@ -834,12 +1287,207 @@ async function runNewRoutes(tmpRoot) {
   const del = JSON.parse((await runHandler(handler, 'DELETE', '/api/custom-presets?name=Mine', undefined, host)).body);
   assert(del.length === 0, 'expected the custom preset to be deleted');
 
+  // Layout cache: empty at first, round-trips, drops bad points, lands on disk.
+  const jsonHost = { ...host, 'content-type': 'application/json' };
+  const empty = JSON.parse((await runHandler(handler, 'GET', '/api/layout', undefined, host)).body);
+  assert(!empty.positions, 'expected no saved layout yet');
+  const savedLayout = await runHandler(handler, 'POST', '/api/layout',
+    JSON.stringify({ layout: 'force', clusterByTag: true, width: 1280, height: 800, positions: { Alpha: [10.04, -5], Beta: [1, 2], Bad: ['x', 1], Inf: [1e9, 0] } }), jsonHost);
+  assert(savedLayout.statusCode === 200 && JSON.parse(savedLayout.body).count === 2, `expected 2 valid positions saved, got ${savedLayout.body}`);
+  const got = JSON.parse((await runHandler(handler, 'GET', '/api/layout', undefined, host)).body);
+  assert(got.layout === 'force' && got.positions.Alpha[0] === 10 && !got.positions.Bad && !got.positions.Inf, `layout round-trip, got ${JSON.stringify(got)}`);
+  const badLayout = await runHandler(handler, 'POST', '/api/layout', JSON.stringify({ layout: 'nope', width: 1, height: 1, positions: {} }), jsonHost);
+  assert(badLayout.statusCode === 400, 'unknown layout name must be rejected');
+  const foreign = await runHandler(handler, 'POST', '/api/layout', JSON.stringify({ layout: 'force', width: 1, height: 1, positions: {} }), { 'content-type': 'application/json' });
+  assert(foreign.statusCode === 403, 'layout writes need a trusted Host header');
+  await new Promise(r => setTimeout(r, 2300)); // save is debounced 2 s
+  const onDisk = JSON.parse(fs.readFileSync(path.join(path.dirname(configPath), 'layout.json'), 'utf8'));
+  assert(onDisk.count === 2 && onDisk.positions.Beta[1] === 2, 'expected layout.json written next to the config');
+
   const patch = await runHandler(handler, 'POST', '/api/config', JSON.stringify({ layout: 'rings', framing: 'left', safeArea: { top: 30, bottom: 90 }, rotate: { themes: ['aurora', 'metro'], everyMinutes: 30 }, maxFps: 0, idleFps: 0 }), { ...host, 'content-type': 'application/json' });
   assert(patch.statusCode === 200, `expected the new keys to validate, got ${patch.body}`);
   const cfgOut = JSON.parse(patch.body);
   assert(cfgOut.safeArea.right === 0 && cfgOut.safeArea.top === 30, 'safeArea fills missing sides with 0');
   const badRotate = await runHandler(handler, 'POST', '/api/config', JSON.stringify({ rotate: { themes: ['nope'] } }), { ...host, 'content-type': 'application/json' });
   assert(badRotate.statusCode === 400, 'rotate must reject unknown themes');
+}
+
+function runIgnorePathsNormalisation() {
+  const v = path.join(path.sep, 'vault');
+  const f = (...parts) => path.join(v, ...parts);
+  // Trailing separators and either separator style mean the same folder.
+  assert(isIgnoredPath(f('templates', 'a.md'), v, ['templates/'], false), 'trailing / must be trimmed');
+  assert(isIgnoredPath(f('templates', 'a.md'), v, ['templates\\'], false), 'trailing \\ must be trimmed');
+  assert(isIgnoredPath(f('Archive', 'Old', 'a.md'), v, ['Archive\\Old'], false), 'backslash prefix must match');
+  assert(isIgnoredPath(f('Archive', 'Old', 'a.md'), v, ['Archive/Old/'], false), 'slash prefix must match');
+  assert(isIgnoredPath(f('Archive', 'Old', 'a.md'), v, ['./Archive/Old'], false), 'leading ./ must be trimmed');
+  assert(!isIgnoredPath(f('Archive', 'Older', 'a.md'), v, ['Archive/Old'], false), 'prefix must end at a segment boundary');
+  assert(!isIgnoredPath(f('Archive', 'a.md'), v, ['Archive/Old'], false), 'a parent folder of the pattern is not ignored');
+  // Case: insensitive on macOS/Windows, sensitive elsewhere.
+  assert(isIgnoredPath(f('Templates', 'a.md'), v, ['templates'], true), 'case-insensitive match expected');
+  assert(isIgnoredPath(f('sub', 'TEMPLATES', 'a.md'), v, ['Templates/'], true), 'case-insensitive segment match expected');
+  assert(!isIgnoredPath(f('Templates', 'a.md'), v, ['templates'], false), 'case-sensitive mode must not fold case');
+  assert(!isIgnoredPath(f('notes', 'a.md'), v, ['/', '  '], false), 'an empty pattern after trimming must match nothing');
+}
+
+async function runStaleParseDiscard(tmpRoot) {
+  const vaultDir = path.join(tmpRoot, 'stale-vault');
+  const file = path.join(vaultDir, 'Alpha.md');
+  writeFile(file, '# Alpha\n[[Beta]]\n');
+  const state = { cfg: sanitizePersistedConfig({ vaultPath: vaultDir }), entries: new Map() };
+  // An add whose parse is still in flight when the unlink arrives must not
+  // resurrect the note.
+  const addP = applyFsEventToState(state, 'add', file);
+  const unlinked = await applyFsEventToState(state, 'unlink', file);
+  assert(unlinked === false, 'nothing to delete yet');
+  assert((await addP) === false, 'a stale add must report no change');
+  assert(!state.entries.has(file), 'a stale add must not resurrect an unlinked note');
+  // Same for an unlinkDir of the parent folder.
+  const nested = path.join(vaultDir, 'sub', 'Nested.md');
+  writeFile(nested, '# Nested\n');
+  const addNested = applyFsEventToState(state, 'add', nested);
+  await applyFsEventToState(state, 'unlinkDir', path.join(vaultDir, 'sub'));
+  await addNested;
+  assert(!state.entries.has(nested), 'a stale add must not survive unlinkDir of its folder');
+  // Two overlapping changes: the newest one wins and the older is dropped.
+  const c1 = applyFsEventToState(state, 'change', file);
+  writeFile(file, '# Alpha\n[[Gamma]]\n');
+  const c2 = applyFsEventToState(state, 'change', file);
+  const [r1, r2] = await Promise.all([c1, c2]);
+  assert(r1 === false && r2 === true, `expected only the newest change to apply, got ${r1}/${r2}`);
+  assert(state.entries.get(file).wikilinks[0] === 'Gamma', 'expected the newest parse to be kept');
+  assert(state.fsPending.size === 0, 'pending map must not leak finished paths');
+  // A plain sequential add still works.
+  fs.rmSync(file);
+  await applyFsEventToState(state, 'unlink', file);
+  writeFile(file, '# Alpha again\n');
+  assert((await applyFsEventToState(state, 'add', file)) === true && state.entries.has(file), 'a fresh add must apply');
+}
+
+async function runServerHardening(tmpRoot) {
+  // Host parsing: bracketed IPv6 with and without a port; empty/malformed rejected.
+  assert(isTrustedHost('[::1]:3000') && isTrustedHost('[::1]'), 'bracketed IPv6 loopback must be trusted');
+  assert(isTrustedHost('LOCALHOST:3000') && isTrustedHost('127.0.0.1'), 'localhost/127.0.0.1 must be trusted');
+  for (const bad of ['', '  ', '::1', '[::1', '[::1]x', '[::2]:3000', 'evil.example:3000', '127.0.0.1:abc', ':3000']) {
+    assert(!isTrustedHost(bad), `Host ${JSON.stringify(bad)} must not be trusted`);
+  }
+  assert(isJsonContentType('application/json; charset=utf-8') && isJsonContentType('Application/JSON'), 'JSON with parameters must be accepted');
+  assert(!isJsonContentType('application/jsonp') && !isJsonContentType('text/plain') && !isJsonContentType(undefined), 'non-JSON must be rejected');
+
+  const vaultDir = path.join(tmpRoot, 'hardening-vault');
+  writeFile(path.join(vaultDir, 'A.md'), '# A\nSome body text that is long enough for an excerpt.\n');
+  const configPath = path.join(tmpRoot, 'hardening', 'config.json');
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  writeJson(configPath, { vaultPath: vaultDir, port: 4322 });
+  const state = {
+    cfg: sanitizePersistedConfig({ vaultPath: vaultDir, port: 4322 }),
+    configPath,
+    outPath: path.join(tmpRoot, 'hardening', 'graph.json'),
+    entries: await scanVaultEntries(vaultDir)
+  };
+  await rebuildGraphState(state);
+  const handler = createRequestHandler(state);
+  const host = { host: '127.0.0.1:4322' };
+  const jsonHost = { ...host, 'content-type': 'application/json' };
+
+  const emptyHost = await runHandler(handler, 'GET', '/api/tags', undefined, { host: '' });
+  assert(emptyHost.statusCode === 403, `an empty Host header must be refused, got ${emptyHost.statusCode}`);
+  const v6 = await runHandler(handler, 'GET', '/api/tags', undefined, { host: '[::1]:4322' });
+  assert(v6.statusCode === 200, `a [::1] Host header must be accepted, got ${v6.statusCode}`);
+
+  // Content-Type with a charset parameter.
+  const charset = await runHandler(handler, 'POST', '/api/config', JSON.stringify({ hubLabels: true }),
+    { ...host, 'content-type': 'application/json; charset=utf-8' });
+  assert(charset.statusCode === 200, `JSON with charset must be accepted, got ${charset.statusCode} ${charset.body}`);
+
+  // A hand edit of config.json not yet applied (debounced watcher) survives a POST.
+  const onDisk = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  writeJson(configPath, { ...onDisk, accent: '#123456' });
+  const merged = JSON.parse((await runHandler(handler, 'POST', '/api/config', JSON.stringify({ zoom: 1.5 }), jsonHost)).body);
+  assert(merged.accent === '#123456' && merged.zoom === 1.5 && merged.hubLabels === true,
+    `POST must merge onto the on-disk config, got accent=${merged.accent} zoom=${merged.zoom}`);
+  // An invalid file on disk falls back to the in-memory config.
+  fs.writeFileSync(configPath, '{ not json');
+  const fallback = await runHandler(handler, 'POST', '/api/config', JSON.stringify({ zoom: 2 }), jsonHost);
+  assert(fallback.statusCode === 200 && JSON.parse(fallback.body).accent === '#123456', 'invalid disk config must fall back to memory');
+
+  // Frame protection on the settings page only; the wallpaper stays embeddable.
+  const settings = await runHandler(handler, 'GET', '/settings.html', undefined, host);
+  assert(settings.statusCode === 200, 'settings.html must be served');
+  assert(/frame-ancestors 'self'/.test(settings.headers['Content-Security-Policy'] || ''), 'settings.html needs frame-ancestors \'self\'');
+  assert(settings.headers['X-Frame-Options'] === 'SAMEORIGIN', 'settings.html needs X-Frame-Options: SAMEORIGIN');
+  const wallpaper = await runHandler(handler, 'GET', '/', undefined, host);
+  assert(wallpaper.statusCode === 200 && !wallpaper.headers['X-Frame-Options'], 'index.html must stay frameable by wallpaper hosts');
+
+  // Note of the hour: the sorted list is cached per graph version.
+  await runHandler(handler, 'GET', '/api/note-of-hour?hour=1', undefined, host);
+  const cached = state.noteOfHourCache && state.noteOfHourCache.sorted;
+  await runHandler(handler, 'GET', '/api/note-of-hour?hour=2', undefined, host);
+  assert(cached && state.noteOfHourCache.sorted === cached, 'note-of-hour must reuse the sorted list within a graph version');
+
+  // Custom presets: sanitized on read, capped, and vault-specific keys dropped.
+  const presetsFile = path.join(path.dirname(configPath), 'custom-presets.json');
+  const many = Array.from({ length: MAX_CUSTOM_PRESETS + 5 }, (_, i) => ({ name: `P${i}`, config: { zoom: 1 } }));
+  writeJson(presetsFile, [
+    null, 'junk', { name: '' }, { name: 'x'.repeat(61) },
+    { name: 'Keep', config: { accent: '#abcdef', focusNote: 'Secret', tagColors: { a: '#000000' }, ignorePaths: ['x'], theme: 'nope', bogus: 1 } },
+    { name: 'Keep', config: {} },
+    ...many
+  ]);
+  const read = JSON.parse((await runHandler(handler, 'GET', '/api/custom-presets', undefined, host)).body);
+  assert(read.length === MAX_CUSTOM_PRESETS, `expected the list capped at ${MAX_CUSTOM_PRESETS}, got ${read.length}`);
+  assert(read[0].name === 'Keep' && read.filter(p => p.name === 'Keep').length === 1, 'bad entries dropped, duplicate names collapsed');
+  assert(JSON.stringify(read[0].config) === JSON.stringify({ accent: '#abcdef' }), `bad/vault-specific keys must be dropped, got ${JSON.stringify(read[0].config)}`);
+  assert(read[0].accent === '#abcdef', 'preset swatch must follow its config');
+  const full = await runHandler(handler, 'POST', '/api/custom-presets', JSON.stringify({ name: 'One more', config: {} }), jsonHost);
+  assert(full.statusCode === 400 && /too many/.test(JSON.parse(full.body).error), `expected the cap to refuse a new preset, got ${full.statusCode}`);
+  const replace = await runHandler(handler, 'POST', '/api/custom-presets', JSON.stringify({ name: 'Keep', config: { focusNote: 'Secret', zoom: 2 } }), jsonHost);
+  assert(replace.statusCode === 200, `replacing an existing preset must work at the cap, got ${replace.statusCode} ${replace.body}`);
+  const replaced = JSON.parse(replace.body).find(p => p.name === 'Keep');
+  assert(replaced && replaced.config.zoom === 2 && !('focusNote' in replaced.config), 'focusNote must not be stored in a preset');
+  assert(sanitizeCustomPresets({}).length === 0, 'a non-array presets file reads as empty');
+
+  // 413 over a real socket: the client must see the status, not a reset.
+  const server = http.createServer(handler);
+  await new Promise(r => server.listen(0, '127.0.0.1', r));
+  try {
+    const port = server.address().port;
+    const status = await new Promise((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port, method: 'POST', path: '/api/config',
+        headers: { 'content-type': 'application/json', host: `127.0.0.1:${port}` } }, res => {
+        res.resume();
+        resolve(res.statusCode);
+      });
+      req.on('error', reject);
+      req.end(Buffer.alloc(3e6, 0x20));
+    });
+    assert(status === 413, `expected a 413 over a real socket, got ${status}`);
+  } finally {
+    await new Promise(r => server.close(r));
+  }
+}
+
+async function runSymlinkFollow(tmpRoot) {
+  const outside = path.join(tmpRoot, 'symlink-outside');
+  writeFile(path.join(outside, 'Linked.md'), '# Linked\n');
+  writeFile(path.join(outside, 'dir', 'InDir.md'), '# InDir\n');
+  const vaultDir = path.join(tmpRoot, 'symlink-follow-vault');
+  writeFile(path.join(vaultDir, 'Alpha.md'), '# Alpha\n');
+  try {
+    fs.symlinkSync(path.join(outside, 'Linked.md'), path.join(vaultDir, 'Linked.md'), 'file');
+    fs.symlinkSync(path.join(outside, 'dir'), path.join(vaultDir, 'linkdir'), 'dir');
+    fs.symlinkSync(path.join(outside, 'missing.md'), path.join(vaultDir, 'Broken.md'), 'file');
+  } catch (e) {
+    console.log(`note: skipping symlink-follow test (symlinks unavailable: ${e.message})`);
+    return;
+  }
+  const entries = await scanVaultEntries(vaultDir);
+  const names = Array.from(entries.values()).map(e => e.basename).sort();
+  assert(JSON.stringify(names) === JSON.stringify(['Alpha', 'InDir', 'Linked']),
+    `expected symlinked notes and folders to be scanned (broken links skipped), got [${names.join(', ')}]`);
+  // The watcher path (applyFsEventToState) treats a symlinked note the same way.
+  const state = { cfg: sanitizePersistedConfig({ vaultPath: vaultDir }), entries: new Map() };
+  assert((await applyFsEventToState(state, 'add', path.join(vaultDir, 'Linked.md'))) === true, 'the watcher must accept a symlinked note');
 }
 
 async function main() {
@@ -854,6 +1502,7 @@ async function main() {
     runLayoutTargets();
     runConfigValidationThrows();
     runIgnorePathsUnit();
+    runIgnorePathsNormalisation();
     runPresetsValidateAgainstSchema();
     runConfigExampleValidatesAgainstSchema(tmpRoot);
     await runHappyPath(tmpRoot);
@@ -865,9 +1514,18 @@ async function main() {
     await run413BodyTooLarge(tmpRoot);
     await runIgnorePathsIntegration(tmpRoot);
     await runLiveWatcherWithIgnorePaths(tmpRoot);
+    await runLiveWatcherDotAncestor(tmpRoot);
     await runSymlinkCycleGuard(tmpRoot);
+    await runSymlinkFollow(tmpRoot);
+    await runStaleParseDiscard(tmpRoot);
+    await runServerHardening(tmpRoot);
     await runEaddrinuse(tmpRoot);
+    await runEaddrinuseOwnInstance(tmpRoot);
     await runLinkResolution(tmpRoot);
+    await runDuplicateBasenameResolution(tmpRoot);
+    await runBridgePluginBuilder(tmpRoot);
+    await runBridgeServerSelection(tmpRoot);
+    await runBridgeLiveWatcher(tmpRoot);
     await runNewRoutes(tmpRoot);
     console.log('smoke: ok');
   } finally {

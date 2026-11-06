@@ -1,0 +1,10 @@
+{
+  "id": "live-wallpaper-bridge",
+  "name": "Live Wallpaper Bridge",
+  "version": "0.1.0",
+  "minAppVersion": "1.4.0",
+  "description": "Feeds obsidian-live-wallpaper with Obsidian's own link and tag index and the note you have open.",
+  "author": "William Ricchiuti",
+  "authorUrl": "https://github.com/william-ricchiuti",
+  "isDesktopOnly": false
+}

@@ -21,16 +21,24 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v6
+      - name: Check tag matches package.json version
+        run: |
+          pkg_version="$(node -p "require('./package.json').version")"
+          if [ "${GITHUB_REF_NAME}" != "v${pkg_version}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match package.json version v${pkg_version}"
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 22
           registry-url: https://registry.npmjs.org
           cache: npm
 
       - run: npm ci
 
       - name: Set up Chrome
-        uses: browser-actions/setup-chrome@2e1d749697dd1612b833dba4a722266286fbefcd # v2
+        uses: browser-actions/setup-chrome@v2
         id: setup-chrome
 
       - name: Test
@@ -45,6 +53,6 @@ jobs:
         run: npm publish --provenance --access public
 
       - name: Create GitHub release
-        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3
+        uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true

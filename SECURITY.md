@@ -6,8 +6,11 @@ Obsidian Live Wallpaper runs entirely on your machine. The Node process:
 
 - binds its HTTP server to the loopback interface only (`127.0.0.1`), so it is
   not reachable from other devices on your network;
-- reads Markdown from the vault path you configure and writes only `graph.json`
-  and `config.json` inside the project directory;
+- reads Markdown from the vault path you configure and writes only
+  `config.json`, `graph.json` (a cold-start/debug copy, saved at startup and
+  shutdown), `layout.json` (cached node positions) and `custom-presets.json`,
+  all in the directory that holds the config file (the current working
+  directory when run with `npx`);
 - serves a fixed allowlist of static files plus a small JSON/SSE API, and
   validates every config write against a strict schema before persisting it;
 - emits only node ids, labels, tags, link structure, and modified-times in

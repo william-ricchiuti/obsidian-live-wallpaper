@@ -76,6 +76,8 @@
     "everyMinutes": 60
   },
   "maxFps": 30,
-  "idleFps": 10,
-  "renderer": "auto"
+  "idleFps": 5,
+  "renderer": "auto",
+  "graphSource": "auto",
+  "highlightActiveNote": true
 }

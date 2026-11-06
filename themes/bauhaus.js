@@ -7,7 +7,7 @@
   THEMES.bauhaus = {
     kind: 'scene', name: 'Bauhaus', dark: false, fg: '#151515', ghost: '#151515', motion: 0.4,
     background: '#ece8df', labelFont: K.DISP, labelSize: 12, labelWeight: 700,
-    labelText: n => n.label.toUpperCase(),
+    labelText: (_n, _S, label) => label.toUpperCase(),
     pal: ['#d4372c', '#1f4e9c', '#f2b705', '#151515', '#2f8f5b', '#e36f2c', '#7a4a9e', '#6b6b6b'],
     draw(ctx, S, t) {
       const { W, H, k } = S;
@@ -30,8 +30,8 @@
       }
       ctx.globalAlpha = 1;
       if (h0) { ctx.fillStyle = '#151515'; ctx.fillRect(S.rect.x, Math.min(H - 10, h0.by + m * 0.23), S.rect.w * 0.42, 3 * k); }
-      K.edgesBatched(ctx, S, () => '#151515', 0.5, 0.7 * k, false);
-      K.edgesBatched(ctx, S, () => '#151515', 0.9, 2.6 * k, false, l => l.a.deg >= 12 && l.b.deg >= 12);
+      K.edgesBatched(ctx, S, () => '#151515', 0.5, 0.7 * k, false, null, 'bauhaus');
+      K.edgesBatched(ctx, S, () => '#151515', 0.9, 2.6 * k, false, l => l.a.deg >= 12 && l.b.deg >= 12, 'bauhaus-hubs');
       ctx.globalCompositeOperation = 'multiply';
       for (const n of S.nodes) {
         const s = Math.max(1.6 * k, n.r * 1.35);

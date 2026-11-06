@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- [Node.js](https://nodejs.org) (v20+)
+- [Node.js](https://nodejs.org) (v20.19 or newer)
 - [Lively Wallpaper](https://www.rocksdanister.com/lively/) — free, open-source wallpaper engine from the Microsoft Store or GitHub
 
 ## Install
@@ -40,11 +40,54 @@ Keep this terminal open (or run it as a background service — see below).
 
 ### Recommended Lively settings
 
-- **Playback**: keep running (so the animation stays alive)
 - **Input forwarding**: off (clicks pass through to desktop)
-- **Pause rule**: set to "Nothing" so the wallpaper stays active
+- **Pause rules**: keep Lively's defaults (pause while a fullscreen or maximised
+  app is in front, on battery, and so on). There is no need to keep the
+  wallpaper running behind other windows: it picks up any vault changes the
+  moment it resumes.
+
+### Let the wallpaper stop drawing while Lively pauses it (optional)
+
+When Lively pauses a web wallpaper it stops showing frames, but the page's
+JavaScript keeps running, so the renderer would keep drawing frames nobody
+sees. The renderer listens for Lively's pause event and stops its frame loop
+completely, but Lively only sends the event when the wallpaper asks for it:
+
+1. Find this wallpaper's folder in Lively's library: the folder that holds its
+   `LivelyInfo.json`. Right-clicking the wallpaper in Lively's library should
+   offer a way to open its location; the exact menu name varies by version.
+2. Close Lively, open `LivelyInfo.json` in a text editor and set
+   `"Arguments": "--pause-event true"`.
+3. Start Lively again.
+
+This is the documented way to switch the event on for web wallpapers (Lively
+wiki, "Web Guide V: System Data"). It has not been tested yet for wallpapers
+added with **Open URL**; if it doesn't work, nothing breaks: the wallpaper just
+keeps idling at `idleFps` while paused.
 
 ## Autostart the parser (optional)
+
+The easy way: install the CLI globally, then let it register a scheduled task
+for you (run this from the folder where you want the config file to live):
+
+```powershell
+npm i -g obsidian-live-wallpaper
+olw install --vault "C:\Users\You\path\to\your\vault"
+```
+
+It writes the config, creates a Task Scheduler task `ObsidianLiveWallpaper-<id>`
+(one per config file, so several vaults can coexist) that runs at logon, starts
+it, and prints the wallpaper URL to give Lively. Task Scheduler does **not**
+restart the server if it crashes; run `schtasks /Run /TN "ObsidianLiveWallpaper-<id>"`
+or log out and back in. Check it with `schtasks /Query /TN "ObsidianLiveWallpaper-<id>" /V /FO LIST`.
+
+- `olw install --dry-run …` prints the `schtasks` commands without doing anything.
+- `olw uninstall` (add `--config <file>` if you used one) ends and deletes the task.
+- `npx obsidian-live-wallpaper install --vault …` also works, but because npx
+  runs from a temporary cache that can be cleared, it stops and asks you to
+  install globally first (`--force` overrides that).
+
+The manual options below do the same thing by hand (pm2 also restarts after a crash).
 
 ### Option A: Task Scheduler
 
@@ -60,15 +103,17 @@ Keep this terminal open (or run it as a background service — see below).
 
 ```powershell
 npm install -g pm2
-pm2 start parser.js --name vault-wallpaper
+pm2 start parser.js --name vault-wallpaper --stop-exit-codes 0
 pm2 save
 pm2 startup
 ```
 
+`--stop-exit-codes 0` keeps pm2 from restarting a clean exit (a second copy exits 0 when the wallpaper is already running). It is documented by pm2, but some older pm2 versions are reported to ignore it.
+
 ## Troubleshooting
 
-- **Blank wallpaper**: check that `graph.json` exists in the project folder. If not, the parser isn't running or `vaultPath` is wrong.
+- **Blank wallpaper**: open `http://127.0.0.1:3000/graph.json` in a browser, or run `curl.exe -s http://127.0.0.1:3000/graph.json` in PowerShell. If it doesn't answer, the server isn't running; if it answers with no nodes, check the server log (`pm2 logs` or the terminal running it) for `vaultPath` or config errors. The graph is served from memory, so a `graph.json` file on disk isn't a reliable signal.
 - **Lively shows a white page**: make sure the parser is running and Lively is pointed at `http://127.0.0.1:3000`.
 - **Backslash paths not working**: use forward slashes (`C:/Users/...`) in `config.json` — Node.js handles them fine on Windows.
 - **Nodes not updating**: edit a note in Obsidian and check the parser terminal for output like `graph: 42 nodes, 87 links`.
-- **Performance**: if your vault is 2000+ notes, increase `refreshMs` to 10000 in `config.json`.
+- **Performance**: for large vaults (2000+ notes), lower `maxRenderedNodes` (the least important nodes are dropped first), lower `idleFps` (`0` holds the last frame once the layout settles) and `maxFps`, and try `"renderer": "webgl"` (`auto` only switches to WebGL above ~3,000 notes). `refreshMs` won't help: it is only the fallback polling interval used when the live update stream is unavailable.

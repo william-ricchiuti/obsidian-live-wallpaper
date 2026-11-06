@@ -1,5 +1,58 @@
 # Changelog
 
+## [1.3.0] - 2026-11-05
+
+### Added
+- **Obsidian bridge plugin** (`obsidian-plugin/`): writes Obsidian's resolved links, tags and the open note to its plugin folder. The server uses that graph (`graphSource`: `auto` | `scan` | `obsidian`, default `auto`; in `auto` only while the plugin's notes match the notes on disk and nothing on disk is newer) and highlights the open note (`highlightActiveNote`, default `true`; `/api/active` and an SSE `active` event).
+- **`olw install` / `olw uninstall`**: per-user autostart via launchd, systemd or Task Scheduler, restarting only on failure, with `--dry-run`.
+- **Layout cache.** When the layout settles, the renderer saves node positions to `layout.json` next to the config (`/api/layout`). A reload (host restart, wake from sleep, display change) starts from that layout instead of recomputing it, and skips the simulation entirely when every note is in the cache.
+- **Lively pause support.** The renderer stops its frame loop while Lively pauses the wallpaper, if `"--pause-event true"` is set in the wallpaper's `LivelyInfo.json` (see `windows-setup.md`).
+- **Second launches exit cleanly.** If this app is already serving the port, a new instance says so and exits 0 instead of failing.
+
+### Changed
+- **A bare `[[Note]]` matching several same-named notes links to one** (same folder first, then the shortest path), not to all of them.
+- **LED's baked board is capped near 4 Mpx** on high-DPI screens (it was ~33 MB at 1080p@2x).
+- **`idleFps` defaults to 5** (was 10). Configs that set `idleFps` explicitly keep their value; that includes configs copied from an older `config.example.json`, which had `10`.
+- **Links and tags closer to Obsidian:** links and `#tags` inside code blocks and inline code are ignored; `[text](Note.md)` markdown links count as links; tags may use any letter and digits (`#café`, `#2024-review`, but not `#2024`); frontmatter `tag:` and `tags: a, b` are read; tags are case-insensitive across the vault (the first spelling wins), so a `tagColors` key may need renaming.
+
+### Performance
+- **Scene themes honour the large-vault budgets.** They used to stroke every link and show up to 7 labels regardless of size; they now follow the same link step and label count as the default pipeline.
+- **Themes build heavy geometry once per layout instead of every frame:** Path2D caching for edges, Metro, Cross-stitch, Stained Glass, Territories, Survey, Sketch and Wash; Celestial's nebula is a cached bitmap limited to the top 8 tags; LED reads its board back once per layout instead of every frame (about 3× faster in software rendering); per-node string and array allocations removed across the theme kit.
+- **Renderer:** settings changes only redo the work their keys affect (ambient dust no longer jumps); the glow sprite cache sizes itself to the colours in use; label and node loops stop allocating per frame; the WebGL path keeps its buffers and skips frames when nothing moved, and no longer needs `preserveDrawingBuffer`; graph reloads are coalesced; placing many new notes no longer scans every link per note.
+
+### Fixed (renderer, settings, server)
+- Very large vaults showed almost no edges (link sampling ignored the render cap).
+- A low-degree `focusNote` could show an empty view under the render cap.
+- `?span=` screens seeded new notes randomly, so monitors disagreed; seeding is now deterministic.
+- Theme rotation, time-of-day and auto light/dark left stale edge colours.
+- "Recent" and age values in scene themes went stale until the vault changed.
+- Display scaling changes (moving to another monitor) are picked up; resize work is debounced.
+- Settings: quick edits to nested options (safe area, label style, tag colours) no longer overwrite each other; the page reloads its data after the server reconnects; errors stay on screen until dismissed.
+- Symlinked notes are scanned and watched consistently; `ignorePaths` accepts trailing slashes, either separator, and (on macOS/Windows) any letter case.
+- A deleted note could come back if its file was still being parsed.
+- `settings.html` can no longer be framed by other sites; JSON requests with `; charset=utf-8` are accepted; custom presets are capped at 100, validated on read, and no longer capture `focusNote`; oversized requests get a clean 413; `[::1]` hosts work.
+- Light themes: Wash no longer goes dark-on-dark, and user palettes no longer wash out; long labels are truncated and flip left instead of disappearing; LED now draws its labels; Metro's legend no longer overlaps on small screens.
+
+### Tooling
+- Node 20.19+ is required (chokidar 5); CI tests 20.19, 22 and 24.
+- `npm run lint` now covers the inline scripts in `index.html` and `settings.html`.
+- The render smoke test fails in CI when Chrome is missing instead of skipping, and test servers use free ports (a fixed port could let another running copy answer and the test pass without testing anything).
+- The release workflow checks the tag matches `package.json`; docs fixed (troubleshooting, performance advice, architecture, config ranges, SECURITY.md).
+
+### Fixed
+- **The wallpaper never went back to idling after a new note appeared.** Flares were only removed while the default theme drew nodes, so with a scene theme, WebGL, or flares disabled (large vaults, reduced motion) the loop stayed at `maxFps`. Flares now end on time.
+- **Animated themes (LED, Mycelium, Phosphor, Synapse) stuttered at the idle rate.** Their `alwaysAnimate` flag was never read; they now keep at least 15 fps (still respecting `idleFps: 0` and reduced motion). Idle frames are also no longer skipped as "early", which halved low idle rates.
+- **After a server restart the page could stop updating** until reloaded: it gave up on the event stream and then ignored version numbers lower than the ones it had seen. It now lets the browser reconnect and reloads whatever changed while it was disconnected.
+- **A note, link or tag named like a built-in object property** (`constructor`, `toString`, `__proto__`) crashed the graph build or produced bogus tag counts.
+- **Vaults inside a dot-folder** (`~/.vaults/…`, `~/.local/…`) loaded but never live-updated.
+- **Changing `ignorePaths` could leave live updates switched off** if the rescan failed, or run two watchers if two changes overlapped.
+- **A theme that failed to load stayed missing until a page reload**, and a theme that threw kept throwing every frame. Loads now retry, and a theme that fails five frames in a row is set aside for the default pipeline until the next settings change.
+- **WebGL context loss** (sleep, GPU driver resets) froze the WebGL renderer; it now falls back to Canvas2D and rebuilds when the context returns.
+- Autostart docs: the macOS launchd plist restarted a clean exit every 10 s and logged nowhere (now `KeepAlive` on failure only, with a log file); pm2 commands gain `--stop-exit-codes 0`.
+- `/graph.json`, `/api/tags`, `/api/config` and `/events` now refuse foreign `Host` headers (DNS rebinding), like the write routes already did.
+- The port-in-use message suggested `--port`, which `npm start` ignores; it now only suggests it under the CLI.
+- Docs: Lively's pause rule should stay on (the old advice was "Nothing"); KDE Plasma needs the HTML Wallpaper plugin from the KDE Store.
+
 ## [1.2.0] - 2026-10-13
 
 ### Added

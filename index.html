@@ -68,7 +68,9 @@ const ctx = canvas.getContext('2d', { alpha: true });
 const bgCanvas = document.getElementById('bg');
 const bgCtx = bgCanvas.getContext('2d', { alpha: false });
 const glCanvas = document.getElementById('gl');
-const DEVICE_DPR = window.devicePixelRatio || 1;
+// Re-read on resize and when the window moves to a screen with a different
+// pixel ratio (watchDevicePixelRatio below).
+let DEVICE_DPR = window.devicePixelRatio || 1;
 let renderScale = DEVICE_DPR;
 
 // DEFAULTS is fetched from /api/defaults; this copy is the fallback for offline
@@ -137,8 +139,10 @@ const DEFAULTS = {
   focusHops: 2,
   rotate: { themes: [], everyMinutes: 60 },
   maxFps: 30,
-  idleFps: 10,
-  renderer: 'auto'
+  idleFps: 5,
+  renderer: 'auto',
+  graphSource: 'auto',
+  highlightActiveNote: true
 };
 
 const ENUMS = {
@@ -152,7 +156,8 @@ const ENUMS = {
   timeOfDay: ['off', 'tint', 'palette'],
   overlay: ['none', 'clock', 'stats', 'note'],
   labelSource: ['hubs', 'recent'],
-  renderer: ['auto', 'canvas', 'webgl']
+  renderer: ['auto', 'canvas', 'webgl'],
+  graphSource: ['auto', 'scan', 'obsidian']
 };
 const FONT_STACKS = {
   sans: "-apple-system, BlinkMacSystemFont, 'Inter', sans-serif",
@@ -161,9 +166,22 @@ const FONT_STACKS = {
 };
 // labelFont is the font control. (labelStyle.fontStyle used to override it,
 // which made the settings dropdown do nothing after any preset was applied.)
+// Note ids, tags and folders come from the vault, so a lookup in a plain
+// object must not pick up inherited properties (a tag named "constructor").
+function ownValue(obj, key) {
+  return obj && Object.prototype.hasOwnProperty.call(obj, key) ? obj[key] : null;
+}
 function labelFontStack() { return FONT_STACKS[cfg.labelFont] || FONT_STACKS.sans; }
 // Deterministic per-folder colour for nodeColorMode 'folder' without a palette.
 const FOLDER_COLOR_CACHE = new Map();
+// Forget colours of folders that no longer exist (renames would otherwise
+// pile up over a long session).
+function pruneFolderColorCache() {
+  if (!FOLDER_COLOR_CACHE.size) return;
+  const live = new Set();
+  for (const n of nodes) if (n.folder) live.add(n.folder);
+  for (const k of FOLDER_COLOR_CACHE.keys()) if (!live.has(k)) FOLDER_COLOR_CACHE.delete(k);
+}
 function folderColor(folder) {
   if (!folder) return cfg.accent;
   let c = FOLDER_COLOR_CACHE.get(folder);
@@ -444,6 +462,7 @@ function normalizeConfig(data) {
     if (!finiteNumber(next[key])) next[key] = DEFAULTS[key];
   }
   next.autoTheme = next.autoTheme === true;
+  next.highlightActiveNote = next.highlightActiveNote !== false;
   next.focusNote = typeof next.focusNote === 'string' ? next.focusNote : '';
   if (typeof next.theme !== 'string' || !/^[a-z0-9-]+$/.test(next.theme)) next.theme = 'default';
   return next;
@@ -494,20 +513,46 @@ function isBigVisualChange(prev, next) {
 // Themes
 // ---------------------------------------------------------------------------
 const themeLoads = new Map();
+const themeLoadAttempts = new Map();
+const THEME_LOAD_MAX_ATTEMPTS = 5;
+// A failed load (server restarting, a script that throws while registering)
+// is forgotten so the next call retries, up to a few attempts per theme.
+// Until then the wallpaper falls back to the default pipeline.
 function ensureTheme(id) {
   if (!id || id === 'default' || (window.THEMES && THEMES[id])) return Promise.resolve();
   if (themeLoads.has(id)) return themeLoads.get(id);
+  const attempts = (themeLoadAttempts.get(id) || 0) + 1;
+  if (attempts > THEME_LOAD_MAX_ATTEMPTS) return Promise.resolve();
+  themeLoadAttempts.set(id, attempts);
   const p = new Promise(resolve => {
     const s = document.createElement('script');
-    s.src = '/themes/' + encodeURIComponent(id) + '.js';
-    s.onload = () => resolve();
-    s.onerror = () => { console.warn('theme failed to load:', id); resolve(); };
+    s.src = '/themes/' + encodeURIComponent(id) + '.js' + (attempts > 1 ? '?retry=' + attempts : '');
+    const done = () => {
+      if (window.THEMES && THEMES[id]) {
+        themeLoadAttempts.delete(id);
+        if (id === cfg.theme) { sceneDirty = true; markConfigChanged(); }
+      } else {
+        console.warn('theme failed to load:', id);
+        themeLoads.delete(id);
+        s.remove();
+      }
+      resolve();
+    };
+    s.onload = done;
+    s.onerror = done;
     document.head.appendChild(s);
   });
   themeLoads.set(id, p);
   return p;
 }
+// Themes that threw on several frames in a row are set aside (the default
+// pipeline draws instead) until the next config change, so one bug can't
+// leave the wallpaper throwing on every frame forever.
+const brokenThemes = new Set();
+const THEME_MAX_CONSECUTIVE_FAILURES = 5;
+let themeFailures = 0;
 function activeTheme() {
+  if (brokenThemes.has(cfg.theme)) return null;
   const t = window.THEMES && THEMES[cfg.theme];
   return t && t.kind !== 'default' ? t : null;
 }
@@ -661,22 +706,61 @@ function computeRenderScale(nextSceneTuning = sceneTuning) {
   return Math.min(base, 2);
 }
 
-function refreshSceneTuning() {
+// Every change to the effective config goes through here: settings edits,
+// theme rotation, time-of-day palette, OS light/dark, reduced motion, day
+// rollover and graph reloads. Each piece of derived state is keyed on the
+// inputs it actually depends on, so a settings change only redoes the work
+// that change affects (a linkOpacity tweak no longer re-sorts the vault,
+// re-measures labels or re-seeds the ambient dust).
+let __capKey = null, __capTuning = null;
+let __derivedKey = null;
+let __ambientKey = null;
+let __staticKey = null;
+function refreshSceneTuning(force) {
   const nextSceneTuning = buildSceneTuning();
   const nextScale = computeRenderScale(nextSceneTuning);
   const scaleChanged = Math.abs(nextScale - renderScale) > 0.001;
   sceneTuning = nextSceneTuning;
+  // The edge-batch cache and the scene cluster key include configStamp.
+  configStamp++;
+  if (force) __capKey = __derivedKey = __ambientKey = __staticKey = null;
   ensureParticlePool(sceneTuning.particleCap);
-  applyRenderableCap();
-  refreshDerivedVisuals();
-  initAmbientParticles();
+
+  const focusQ = String(cfg.focusNote || '').trim().toLowerCase();
+  const capKey = [graphEpoch, focusQ, cfg.focusHops, cfg.maxRenderedNodes, sceneTuning.maxRenderedNodes || 0,
+    sceneTuning.linkStep, focusQ === 'today' ? dayKey() : ''].join('|');
+  if (capKey !== __capKey) {
+    __capKey = capKey;
+    applyRenderableCap();
+    __capTuning = { maxRenderedNodes: sceneTuning.maxRenderedNodes, linkStep: sceneTuning.linkStep };
+  } else if (__capTuning) {
+    sceneTuning.maxRenderedNodes = __capTuning.maxRenderedNodes;
+    sceneTuning.linkStep = __capTuning.linkStep;
+  }
+
+  const derivedKey = [graphEpoch, cfg.palette, cfg.nodeColorMode, cfg.recencyDays, JSON.stringify(cfg.tagColors || {}), cfg.accent,
+    sceneTuning.edgeColoringEnabled, cfg.labelSource, sceneTuning.labelMinImportance, cfg.labelFont,
+    cfg.nodeColorMode === 'recency' ? Math.floor(Date.now() / 3600000) : ''].join('|');
+  if (derivedKey !== __derivedKey) {
+    __derivedKey = derivedKey;
+    refreshDerivedVisuals();
+  }
+
+  const ambientKey = [cfg.ambientParticles, cfg.ambientParticleCount, cfg.ambientParticleSpeed, cfg.ambientParticleSize, REDUCED_MOTION].join('|');
+  if (ambientKey !== __ambientKey) {
+    __ambientKey = ambientKey;
+    initAmbientParticles();
+  }
+
   updateGLState();
-  cachedHalos = null;
   framingDirty = true;
+  const staticKey = [cfg.background, cfg.accent, sceneTuning.backgroundGradientEnabled, sceneTuning.haloAlpha, sceneTuning.haloRadiusBoost, derivedKey, capKey].join('|');
   if (scaleChanged) {
+    __staticKey = staticKey;
     renderScale = nextScale;
     resize();
-  } else {
+  } else if (staticKey !== __staticKey) {
+    __staticKey = staticKey;
     invalidateStaticLayer();
   }
 }
@@ -722,18 +806,26 @@ function computeFocusSet() {
   }
   const set = new Set();
   for (let i = 0; i < nodes.length; i++) if (dist[i] >= 0) set.add(i);
+  set.root = root;
   return set;
 }
 
+// Links whose two ends are both renderable. Large-vault edge sampling
+// (linkStep) works on this list: sampling every Nth link of the whole vault
+// and then dropping the ones touching capped-out notes left almost no edges.
+let renderLinks = [];
+let renderEpoch = 0;
 function applyRenderableCap() {
   focusSet = computeFocusSet();
   const cfgCap = finiteNumber(cfg.maxRenderedNodes) ? Math.floor(cfg.maxRenderedNodes) : 0;
   const tierCap = sceneTuning.maxRenderedNodes || 0;
-  let cap = 0;
-  if (cfgCap > 0 && tierCap > 0) cap = Math.min(cfgCap, tierCap);
-  else cap = cfgCap || tierCap;
-  if (!cap || cap >= nodes.length) {
-    for (let i = 0; i < nodes.length; i++) nodes[i].__renderable = true;
+  const cap = cfgCap > 0 && tierCap > 0 ? Math.min(cfgCap, tierCap) : (cfgCap || tierCap);
+  // With a focus note the cap applies within its neighbourhood, so a
+  // low-degree focus note still shows its most important neighbours instead
+  // of whatever happened to survive the vault-wide top-N.
+  const pool = focusSet ? focusSet.size : nodes.length;
+  if (!cap || cap >= pool) {
+    for (let i = 0; i < nodes.length; i++) nodes[i].__renderable = !focusSet || focusSet.has(i);
     sceneTuning.maxRenderedNodes = focusSet ? nodes.length : 0;
   } else {
     sceneTuning.maxRenderedNodes = cap;
@@ -746,15 +838,39 @@ function applyRenderableCap() {
       __rankValid = true;
     }
     for (let i = 0; i < nodes.length; i++) nodes[i].__renderable = false;
-    for (let i = 0; i < cap && i < __rankedIdx.length; i++) nodes[__rankedIdx[i]].__renderable = true;
+    let taken = 0;
+    for (let i = 0; i < __rankedIdx.length && taken < cap; i++) {
+      const idx = __rankedIdx[i];
+      if (focusSet && !focusSet.has(idx)) continue;
+      nodes[idx].__renderable = true;
+      taken++;
+    }
+    if (focusSet && nodes[focusSet.root]) nodes[focusSet.root].__renderable = true;
   }
-  if (focusSet) {
-    for (let i = 0; i < nodes.length; i++) if (!focusSet.has(i)) nodes[i].__renderable = false;
+  let all = true;
+  for (let i = 0; i < nodes.length; i++) if (nodes[i].__renderable === false) { all = false; break; }
+  if (all) {
+    renderLinks = links;
+  } else {
+    renderLinks = [];
+    for (const l of links) if (l.source.__renderable !== false && l.target.__renderable !== false) renderLinks.push(l);
+    // The massive/ultra budget is ~1800 drawn edges; size the step to the
+    // links that can actually be drawn.
+    if (sceneTuning.massive || sceneTuning.ultra) {
+      sceneTuning.linkStep = Math.max(1, Math.min(sceneTuning.linkStep, Math.ceil(renderLinks.length / 1800)));
+    }
   }
+  renderEpoch++;
   sceneDirty = true;
 }
 
+// Repaints only when the colours changed: a flat repaint here would also
+// throw away the cached gradient + halo layer on every unrelated setting.
+let __appliedBgKey = '';
 function applyBackground() {
+  const bgKey = cfg.background + '|' + cfg.accent;
+  if (bgKey === __appliedBgKey) return;
+  __appliedBgKey = bgKey;
   document.body.style.background = cfg.background;
   // #bg is opaque; paint it right away so there is never a black flash before
   // the first frame (or while the page starts hidden).
@@ -936,19 +1052,75 @@ function updateGLState() {
   if (!glActive && glRenderer) glRenderer.clear();
 }
 
-addEventListener('resize', () => {
+// GPU resets (sleep/wake, driver updates, the host restarting its GPU process)
+// lose the WebGL context, after which every GL call silently does nothing.
+// Fall back to Canvas2D straight away, and rebuild the GL renderer if the
+// browser restores the context.
+glCanvas.addEventListener('webglcontextlost', (e) => {
+  e.preventDefault(); // tells the browser we want a 'webglcontextrestored'
+  console.warn('webgl context lost; drawing with Canvas2D');
+  glRenderer = null;
+  glActive = false;
+  glCanvas.style.display = 'none';
+  markConfigChanged();
+});
+glCanvas.addEventListener('webglcontextrestored', () => {
+  glTried = false;
+  updateGLState();
+  markConfigChanged();
+});
+
+// Canvas reallocation, the grain rebuild and re-seeding the dust are
+// debounced: a window drag fires dozens of resize events per second.
+// Oneshot captures stay synchronous (headless screenshots resize the window
+// right before capture and have no frame loop).
+let resizeTimer = null;
+function handleResize() {
+  resizeTimer = null;
+  const dpr = window.devicePixelRatio || 1;
+  if (Math.abs(dpr - DEVICE_DPR) > 0.001) {
+    DEVICE_DPR = dpr;
+    labelSpriteCache.clear();
+    renderScale = computeRenderScale();
+  }
   resize();
   grainBuiltFor = '';
   applyPostLayers();
   initAmbientParticles();
   markConfigChanged();
-  // Resizing clears the canvases; oneshot captures have no frame loop, so
-  // repaint directly (headless screenshots resize the window before capture).
   if (ONESHOT && __bootDone) { for (let i = 0; i < 2; i++) draw(); }
+}
+addEventListener('resize', () => {
+  if (ONESHOT) { handleResize(); return; }
+  if (resizeTimer) clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(handleResize, 150);
 });
+// Moving the window to a screen with another pixel ratio (or changing the OS
+// scale) doesn't always fire 'resize'. A resolution media query does; it
+// matches one exact ratio, so it is re-armed after every change.
+(function watchDevicePixelRatio() {
+  if (!window.matchMedia) return;
+  let mq;
+  try { mq = matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`); } catch (e) { return; }
+  const onChange = () => {
+    if (mq.removeEventListener) mq.removeEventListener('change', onChange);
+    else if (mq.removeListener) mq.removeListener(onChange);
+    if (resizeTimer) clearTimeout(resizeTimer);
+    handleResize();
+    watchDevicePixelRatio();
+  };
+  if (mq.addEventListener) mq.addEventListener('change', onChange);
+  else if (mq.addListener) mq.addListener(onChange);
+})();
 
 let GLOW_SPRITE_CACHE = new Map();
-const GLOW_SPRITE_CACHE_MAX = 60;
+// The LRU cap follows the number of colours drawn in the last frame (set in
+// drawNodes): a fixed cap below that count (nodeColorMode 'folder' with 100
+// folders) evicted and rebuilt ~every sprite every frame. Folder hues are
+// whole degrees and palettes are short, so the live count stays bounded.
+const GLOW_SPRITE_CACHE_MIN = 60;
+const GLOW_SPRITE_CACHE_HARD_MAX = 512;
+let GLOW_SPRITE_CACHE_MAX = GLOW_SPRITE_CACHE_MIN;
 const GLOW_SPRITE_SIZE = 128;
 
 function rgbToHsl(r, g, b) {
@@ -1025,7 +1197,9 @@ function snapshotForFade() {
     g.clearRect(0, 0, w, h);
     // Composite every visible layer so the fade covers background changes too.
     if (bgCanvas.style.display !== 'none') g.drawImage(bgCanvas, 0, 0, w, h);
-    if (glActive) g.drawImage(glCanvas, 0, 0, w, h);
+    // The GL canvas has no preserved drawing buffer; re-issue its last frame
+    // so it can be read in this task.
+    if (glActive && glRenderer) { glRenderer.redraw(); g.drawImage(glCanvas, 0, 0, w, h); }
     g.drawImage(canvas, 0, 0);
     __fadeStart = performance.now();
     __fadeActive = true;
@@ -1093,17 +1267,35 @@ function rankMap(values) {
   return m;
 }
 
+// Graph-only per-node data (ranks, label text, hashes): runs on graph loads,
+// not on settings changes.
+function prepareGraphStatics() {
+  refreshAgeStats();
+  tagRank = rankMap(nodes.filter(n => !n.ghost).map(n => n.tag));
+  folderRank = rankMap(nodes.filter(n => !n.ghost).map(n => n.folder));
+  for (let i = 0; i < nodes.length; i++) {
+    const node = nodes[i];
+    node.__shape = node.tag ? (tagRank.get(node.tag) || 0) % 4 : 0;
+    // Breathing offset is always assigned (it used to be set only if breathing
+    // was on at load, so enabling it later gave NaN and erased every glow).
+    node.__breathOffset = (Math.abs(hashStr(node.id)) % 6283) / 1000;
+    node.__labelText = truncateLabel(node.label || node.id, 28);
+    node.__labelFontSize = Math.max(10, 11 + (node.importance || 0) * 5);
+  }
+  pruneFolderColorCache();
+}
+
+// Colours and label metrics: depend on the graph and on colour/label
+// settings. refreshSceneTuning calls this only when one of those changed.
 function refreshDerivedVisuals() {
   palette = cfg.palette && cfg.palette !== 'auto' ? PALETTES[cfg.palette] || null : null;
   if (nodes.length === 0) {
     labelCandidates = [];
     return;
   }
-  refreshAgeStats();
-  tagRank = rankMap(nodes.filter(n => !n.ghost).map(n => n.tag));
-  folderRank = rankMap(nodes.filter(n => !n.ghost).map(n => n.folder));
   const mode = cfg.nodeColorMode;
   const recencyDays = cfg.recencyDays || 7;
+  const fontStack = labelFontStack();
 
   for (let i = 0; i < nodes.length; i++) {
     const node = nodes[i];
@@ -1114,22 +1306,18 @@ function refreshDerivedVisuals() {
     } else if (mode === 'folder') {
       color = palette && node.folder ? palette[(folderRank.get(node.folder) || 0) % palette.length] : folderColor(node.folder);
     } else {
-      color = (node.tag && cfg.tagColors[node.tag])
+      color = (node.tag && ownValue(cfg.tagColors, node.tag))
         || (palette && node.tag ? palette[(tagRank.get(node.tag) || 0) % palette.length] : null)
         || cfg.accent;
     }
     node.__color = color;
     node.__dim = mode === 'recency' && (node.ghost || nodeDays(node) >= recencyDays) ? 1 : 0;
-    node.__shape = node.tag ? (tagRank.get(node.tag) || 0) % 4 : 0;
-    // Breathing offset is always assigned (it used to be set only if breathing
-    // was on at load, so enabling it later gave NaN and erased every glow).
-    node.__breathOffset = (Math.abs(hashStr(node.id)) % 6283) / 1000;
-    node.__labelText = truncateLabel(node.label || node.id, 28);
-    node.__labelFontSize = Math.max(10, 11 + (node.importance || 0) * 5);
     if (!node.ghost && (node.importance || 0) >= sceneTuning.labelMinImportance) {
-      ctx.font = `${node.__labelFontSize}px ${labelFontStack()}`;
+      node.__labelFont = `${node.__labelFontSize}px ${fontStack}`;
+      ctx.font = node.__labelFont;
       node.__labelWidth = ctx.measureText(node.__labelText).width;
     } else {
+      node.__labelFont = '';
       node.__labelWidth = 0;
     }
   }
@@ -1150,6 +1338,22 @@ function refreshDerivedVisuals() {
   }
   sceneDirty = true;
   labelSpriteCache.clear();
+  pruneColorCaches();
+}
+
+// Per-colour batches, parsed colours and glow sprites are keyed by colour.
+// Drop the ones no node or edge uses any more (palette / colour-mode
+// changes), so a long session doesn't keep iterating dead groups.
+function pruneColorCaches() {
+  const live = new Set([cfg.accent]);
+  for (let i = 0; i < nodes.length; i++) live.add(nodes[i].__color);
+  for (let i = 0; i < links.length; i++) live.add(links[i].__color);
+  for (const k of edgeGroups.keys()) if (!live.has(k)) edgeGroups.delete(k);
+  for (const k of nodeGroups.keys()) if (!live.has(k)) nodeGroups.delete(k);
+  for (const k of particleDrawGroups.keys()) if (!live.has(k)) particleDrawGroups.delete(k);
+  // hexToRGB is also fed background/label colours; those are re-parsed on
+  // demand, so a blunt clear once the cache has grown is fine.
+  if (RGB_CACHE.size > live.size + 64) RGB_CACHE.clear();
 }
 
 function syncSharedPositions() {
@@ -1195,6 +1399,10 @@ function computeFramingTarget() {
   framingLastCompute = performance.now();
   framingDirty = false;
   const sa = cfg.safeArea || {};
+  // Span mode assumes every screen in the set has this page's width and
+  // height: each page only knows its own viewport, so the virtual canvas is
+  // innerWidth * count and screen i starts at i * innerWidth. Mixed monitor
+  // sizes would need each page to be told the others' widths (not supported).
   const virtW = innerWidth * SPAN.count;
   const H = innerHeight;
   const left = (SPAN.index === 0 ? sa.left || 0 : 0);
@@ -1355,6 +1563,9 @@ async function loadJson(pathname, options) {
 }
 
 async function loadCfg() {
+  // Any settings change gives a set-aside theme another chance.
+  brokenThemes.clear();
+  themeFailures = 0;
   const prevRefreshMs = cfg.refreshMs;
   const prevCfg = cfg;
   let raw = null;
@@ -1371,9 +1582,11 @@ async function loadCfg() {
     await ensureTheme(nextCfg.theme);
     if (__hasRendered && isBigVisualChange(prevCfg, nextCfg)) snapshotForFade();
     const layoutChanged = prevCfg.layout !== nextCfg.layout || prevCfg.clusterByTag !== nextCfg.clusterByTag;
+    const depthChanged = prevCfg.depthParallaxLayers !== nextCfg.depthParallaxLayers || (!prevCfg.depthParallax && nextCfg.depthParallax);
     cfg = nextCfg;
     if (layoutChanged && nodes.length && SYNTHETIC_SIZE === 0) startSimulation(0.8);
-    if (cfg.depthParallax && nodes.length) assignDepthLayers();
+    // loadGraph assigns depth layers; only a layer-count change needs a redo.
+    if (depthChanged && cfg.depthParallax && nodes.length) assignDepthLayers();
   }
   applyBackground();
   refreshSceneTuning();
@@ -1431,6 +1644,7 @@ function ensureSimWorker() {
       invalidateStaticLayer();
       sceneDirty = true;
       wake();
+      scheduleLayoutSave();
     }
   };
   simWorker.onerror = (err) => {
@@ -1530,6 +1744,41 @@ function settleSynchronously(alpha) {
   invalidateStaticLayer();
 }
 
+// ---------------------------------------------------------------------------
+// Layout cache (/api/layout): settled positions survive page reloads.
+// ---------------------------------------------------------------------------
+const LAYOUT_CACHE_ENABLED = SYNTHETIC_SIZE === 0 && !ONESHOT;
+let layoutSaveTimer = null;
+// Returns the saved layout when it was made with the current layout settings,
+// otherwise null (a different layout would just be relaxed away anyway).
+async function loadLayoutCache() {
+  if (!LAYOUT_CACHE_ENABLED) return null;
+  const data = await loadJson('/api/layout');
+  if (!data || !data.positions || data.layout !== cfg.layout || !!data.clusterByTag !== !!cfg.clusterByTag) return null;
+  if (!(data.width > 0 && data.height > 0)) return null;
+  return data;
+}
+// Saves positions once the layout has come to rest. Not from the settings
+// preview, which may be showing an unsaved layout.
+function scheduleLayoutSave() {
+  if (!LAYOUT_CACHE_ENABLED || PREVIEW_MODE || EXPORT_MODE || !nodes.length) return;
+  if (!(innerWidth > 0 && innerHeight > 0)) return; // collapsed/hidden view: nothing meaningful to save
+  if (layoutSaveTimer) clearTimeout(layoutSaveTimer);
+  layoutSaveTimer = setTimeout(() => {
+    layoutSaveTimer = null;
+    if (simRunning) return; // restarted meanwhile; the next stop saves
+    const positions = Object.create(null);
+    for (const n of nodes) {
+      if (Number.isFinite(n.x) && Number.isFinite(n.y)) positions[n.id] = [Math.round(n.x * 10) / 10, Math.round(n.y * 10) / 10];
+    }
+    fetch('/api/layout', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ layout: cfg.layout, clusterByTag: !!cfg.clusterByTag, width: innerWidth, height: innerHeight, positions })
+    }).catch(() => {});
+  }, 1000);
+}
+
 function topologyOf(graph) {
   // Ids, tags and links: what the layout depends on. mtime/label/folder
   // changes (e.g. editing a note's body) don't move anything.
@@ -1555,7 +1804,35 @@ async function fetchGraph() {
   }
 }
 
-async function loadGraph() {
+// Graph loads are serialised: a burst of 'graph' events (a sync client
+// writing many files) used to start several full loads in parallel, all
+// fetching and rebuilding the same graph. While one runs, further requests
+// just mark it dirty and a single follow-up load runs after it.
+let graphLoadPromise = null;
+let graphLoadDirty = false;
+function loadGraph() {
+  if (graphLoadPromise) { graphLoadDirty = true; return graphLoadPromise; }
+  graphLoadPromise = (async () => {
+    try {
+      do {
+        graphLoadDirty = false;
+        await loadGraphOnce();
+      } while (graphLoadDirty);
+    } finally {
+      graphLoadPromise = null;
+    }
+  })();
+  return graphLoadPromise;
+}
+
+// Deterministic jitter in [-0.5, 0.5): with ?span=NofM every screen runs its
+// own copy of the page, and Math.random seeding gave each one a different
+// layout.
+function seedJitter(id, salt) {
+  return LayoutCore.hash01(id + salt) - 0.5;
+}
+
+async function loadGraphOnce() {
   try {
     const graph = await fetchGraph();
     if (graph === 'unchanged') return;
@@ -1593,21 +1870,41 @@ async function loadGraph() {
       if (s && t) links.push({ source: s, target: t });
     }
 
+    // First load: place notes where the last settled layout left them, so a
+    // reload doesn't recompute (or reshuffle) the whole graph.
+    let cachedHits = 0;
+    if (kept === 0) {
+      const cache = await loadLayoutCache();
+      if (cache) {
+        const dx = (innerWidth - cache.width) / 2, dy = (innerHeight - cache.height) / 2;
+        for (const n of nodes) {
+          const p = n.__new && ownValue(cache.positions, n.id);
+          if (!p) continue;
+          n.x = p[0] + dx; n.y = p[1] + dy;
+          delete n.__new;
+          cachedHits++;
+        }
+      }
+    }
+
     // Seed new notes next to the notes they link to (or near the centre of
     // the layout), so they appear in place instead of flying in.
     const spread = Math.min(innerWidth, innerHeight) * 0.4;
-    let seeded = 0;
-    for (const n of nodes) {
-      if (!n.__new) continue;
-      let sx = 0, sy = 0, c = 0;
-      for (const l of links) {
-        const o = l.source === n ? l.target : l.target === n ? l.source : null;
-        if (o && !o.__new && hasPoint(o)) { sx += o.x; sy += o.y; c++; }
-      }
-      if (c) { n.x = sx / c + (Math.random() - 0.5) * 20; n.y = sy / c + (Math.random() - 0.5) * 20; seeded++; }
+    // One pass over the links (it used to scan every link per new note, which
+    // is quadratic on a first load without a layout cache).
+    const seedSum = new Map();
+    const addSeed = (n, o) => {
+      if (!n.__new || o.__new || !hasPoint(o)) return;
+      let s = seedSum.get(n);
+      if (!s) { s = { x: 0, y: 0, c: 0 }; seedSum.set(n, s); }
+      s.x += o.x; s.y += o.y; s.c++;
+    };
+    for (const l of links) { addSeed(l.source, l.target); addSeed(l.target, l.source); }
+    for (const [n, s] of seedSum) {
+      n.x = s.x / s.c + seedJitter(n.id, '#sx') * 20; n.y = s.y / s.c + seedJitter(n.id, '#sy') * 20;
     }
     for (const n of nodes) {
-      if (n.__new && !hasPoint(n)) { n.x = innerWidth / 2 + (Math.random() - 0.5) * spread; n.y = innerHeight / 2 + (Math.random() - 0.5) * spread; }
+      if (n.__new && !hasPoint(n)) { n.x = innerWidth / 2 + seedJitter(n.id, '#cx') * spread; n.y = innerHeight / 2 + seedJitter(n.id, '#cy') * spread; }
       delete n.__new;
     }
 
@@ -1636,7 +1933,7 @@ async function loadGraph() {
     // Depth layers need importance, so they are assigned after it is known.
     assignDepthLayers();
     graphEpoch++;
-    refreshAgeStats();
+    prepareGraphStatics();
     refreshSceneTuning();
     if (cfg.overlay === 'stats') renderOverlay();
 
@@ -1650,10 +1947,22 @@ async function loadGraph() {
       markConfigChanged();
       return;
     }
-    if (topologyChanged) {
+    if (topologyChanged && cachedHits === nodes.length) {
+      // Every note came from the saved layout: it is already settled. A run
+      // still going for an earlier graph must not overwrite these positions.
+      simGeneration += 1;
+      if (simWorker) { try { simWorker.postMessage({ type: 'stop' }); } catch (_) {} }
+      simSharedEnabled = false;
+      simSharedPositions = null;
+      simRunning = false;
+      simAlpha = 0;
+      framingDirty = true;
+      invalidateStaticLayer();
+    } else if (topologyChanged) {
       // Warm restart when most notes already have positions: the layout only
       // relaxes around what changed instead of re-shuffling everything.
-      const warm = kept > 0 && kept >= nodes.length * 0.8;
+      const placed = kept + cachedHits;
+      const warm = placed > 0 && placed >= nodes.length * 0.8;
       startSimulation(warm ? 0.25 : 1);
     }
     sceneDirty = true;
@@ -1707,6 +2016,65 @@ function getFlareIntensity(nodeId) {
   }
   const t = age / flare.duration;
   return t < 0.15 ? t / 0.15 : 1 - ((t - 0.15) / 0.85);
+}
+
+// ---------------------------------------------------------------------------
+// Active note: the note open in Obsidian, from the bridge plugin
+// (obsidian-plugin/) via /api/active and the SSE 'active' event. It gets a
+// flare when it changes and a static ring (drawActiveRing) while it stays
+// open. The ring never animates, so it doesn't keep the idle loop awake.
+// ---------------------------------------------------------------------------
+let activeNoteId = null;
+let __activeLoaded = false;
+let __activeNodeRef = null;
+let __activeNodesFor = null; // the `nodes` array __activeNodeRef was looked up in
+function setActiveNote(id) {
+  const next = typeof id === 'string' && id ? id : null;
+  const first = !__activeLoaded;
+  __activeLoaded = true;
+  if (next === activeNoteId) return;
+  activeNoteId = next;
+  __activeNodesFor = null;
+  // No flare for the note that was already open when the page loaded.
+  if (next && !first && cfg.highlightActiveNote && !REDUCED_MOTION) flares.set(next, { start: performance.now(), duration: 1800 });
+  wake();
+}
+// The active note's node object in `nodes`, or null (not in the graph, or
+// highlightActiveNote off). Looked up once per graph load, not per frame.
+function activeNode() {
+  if (!activeNoteId || !cfg.highlightActiveNote) return null;
+  if (__activeNodesFor !== nodes) {
+    __activeNodesFor = nodes;
+    __activeNodeRef = nodes.find(n => n.id === activeNoteId && !n.ghost) || null;
+  }
+  return __activeNodeRef;
+}
+async function loadActiveNote() {
+  if (SYNTHETIC_SIZE > 0 || ONESHOT) return;
+  const data = await loadJson('/api/active');
+  if (data) setActiveNote(data.id);
+}
+// Default pipeline (canvas 2D and WebGL): a thin ring plus a soft halo
+// around the active node, drawn on the 2D canvas after the nodes.
+function drawActiveRing() {
+  const node = activeNode();
+  if (!node || !node.__hasPoint || !finiteNumber(node.__fx) || node.__renderable === false) return;
+  const r = (node.__rad || node.r || 3) + 4;
+  const dark = themeIsDark();
+  ctx.save();
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.globalAlpha = 1;
+  ctx.lineWidth = 1.25;
+  ctx.strokeStyle = dark ? 'rgba(255,255,255,0.7)' : 'rgba(20,20,30,0.6)';
+  ctx.beginPath();
+  ctx.arc(node.__fx, node.__fy, r, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = rgba(...hexToRGB(cfg.accent || '#7c5cff'), dark ? 0.28 : 0.22);
+  ctx.beginPath();
+  ctx.arc(node.__fx, node.__fy, r + 3.5, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
 }
 
 // ---------------------------------------------------------------------------
@@ -1891,13 +2259,14 @@ let drawEdges = function () {
   const style = sceneTuning.edgeStyle || cfg.edgeStyle || 'line';
   if (style === 'none') return;
   const motionless = sceneTuning.motion.driftAmp === 0 || REDUCED_MOTION;
-  const key = motionless && !simRunning ? `${graphEpoch}|${framingEpoch}|${tick > 0}|${renderScale}|${configStamp}` : '';
+  const key = motionless && !simRunning ? `${graphEpoch}|${renderEpoch}|${framingEpoch}|${tick > 0}|${renderScale}|${configStamp}` : '';
   if (!key || key !== edgeCacheKey) {
     edgeCacheKey = key;
     for (const byColor of edgeGroups.values()) for (const g of byColor.values()) g.segments.length = 0;
     const dof = sceneTuning.depthOfFieldEnabled;
-    for (let i = 0; i < links.length; i += sceneTuning.linkStep) {
-      const link = links[i];
+    const list = renderLinks;
+    for (let i = 0; i < list.length; i += sceneTuning.linkStep) {
+      const link = list[i];
       const s = link.source, t = link.target;
       if (s.__vFrame !== tick && t.__vFrame !== tick) continue;
       if (!s.__hasPoint || !t.__hasPoint) continue;
@@ -1966,6 +2335,90 @@ function addShapePath(g, shape, x, y, r) {
 // loop allocated an object per node per frame plus fresh Maps per colour).
 const nodeGroups = new Map();
 const BUCKETS = Array.from({ length: 9 }, () => []);
+const HI_BUCKETS = Array.from({ length: 9 }, () => []);
+
+function drawGlowList(list, sprite, glowIntensity, breathing, breathPhase) {
+  for (let i = 0; i < list.length; i++) {
+    const node = list[i];
+    if (node.ghost) continue;
+    let glowRadius = (node.__rad + 3 + Math.sqrt(node.__rad)) * sceneTuning.glowScale * glowIntensity;
+    // Breathing is wall-clock based so the ~30s cycle is the same at any fps.
+    if (breathing) glowRadius *= 1 + Math.sin(breathPhase * cfg.glowBreathingSpeed + node.__breathOffset) * cfg.glowBreathingDepth;
+    if (!(glowRadius > 0)) continue;
+    const glowAlpha = (0.08 + (node.importance || 0) * 0.15 + node.__pulse * 0.03 + node.__flare * 0.4) * node.__dofA * glowIntensity;
+    if (glowAlpha <= 0) continue;
+    ctx.globalAlpha = Math.min(1, glowAlpha);
+    ctx.drawImage(sprite, node.__fx - glowRadius, node.__fy - glowRadius, glowRadius * 2, glowRadius * 2);
+  }
+}
+
+function drawCoreList(list, group, shapes) {
+  const cr = group.r, cg = group.g, cb = group.b;
+  for (const b of BUCKETS) b.length = 0;
+  for (const b of HI_BUCKETS) b.length = 0;
+  for (let i = 0; i < list.length; i++) {
+    const node = list[i];
+    const ghostDim = node.ghost ? 0.35 : 1;
+    const coreAlpha = Math.min(1, (0.55 + (node.importance || 0) * 0.35 + node.__pulse * 0.1 + node.__flare * 0.4) * node.__dofA * ghostDim);
+    if (node.__flare > 0) {
+      const f = node.__flare;
+      ctx.fillStyle = rgba(Math.min(255, cr + Math.floor(f * 200)), Math.min(255, cg + Math.floor(f * 200)), Math.min(255, cb + Math.floor(f * 200)), coreAlpha);
+      ctx.beginPath();
+      addShapePath(ctx, shapes ? node.__shape : 0, node.__fx, node.__fy, node.__rad);
+      ctx.fill();
+      if (!node.ghost) {
+        ctx.fillStyle = rgba(Math.min(255, cr + 80 + Math.floor(f * 175)), Math.min(255, cg + 80 + Math.floor(f * 175)), Math.min(255, cb + 80 + Math.floor(f * 175)), Math.min(1, (0.7 + node.__pulse * 0.3) * node.__dofA));
+        ctx.beginPath();
+        ctx.arc(node.__fx, node.__fy, node.__rad * 0.4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      continue;
+    }
+    BUCKETS[Math.max(1, Math.min(8, Math.round(coreAlpha * 8)))].push(node);
+    if (!node.ghost && (node.importance || 0) > 0.3) {
+      HI_BUCKETS[Math.max(1, Math.min(8, Math.round(Math.min(1, (0.7 + node.__pulse * 0.3) * node.__dofA) * 8)))].push(node);
+    }
+  }
+  ctx.fillStyle = group.color;
+  for (let b = 1; b <= 8; b++) {
+    const batch = BUCKETS[b];
+    if (!batch.length) continue;
+    ctx.globalAlpha = b / 8;
+    ctx.beginPath();
+    for (let i = 0; i < batch.length; i++) {
+      const node = batch[i];
+      addShapePath(ctx, shapes ? node.__shape : 0, node.__fx, node.__fy, node.__rad);
+    }
+    ctx.fill();
+  }
+  ctx.fillStyle = group.hiColor;
+  for (let b = 1; b <= 8; b++) {
+    const batch = HI_BUCKETS[b];
+    if (!batch.length) continue;
+    ctx.globalAlpha = b / 8;
+    ctx.beginPath();
+    for (let i = 0; i < batch.length; i++) {
+      const node = batch[i];
+      ctx.moveTo(node.__fx + node.__rad * 0.4, node.__fy);
+      ctx.arc(node.__fx, node.__fy, node.__rad * 0.4, 0, Math.PI * 2);
+    }
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+// Per-colour groups carry their colour and parsed channels, so the frame loop
+// iterates Map values without entry arrays, closures or destructuring.
+function nodeGroupFor(color) {
+  let group = nodeGroups.get(color);
+  if (!group) {
+    const [r, g, b] = hexToRGB(color);
+    group = { color, r, g, b, hiColor: rgba(Math.min(255, r + 80), Math.min(255, g + 80), Math.min(255, b + 80), 1), low: [], high: [] };
+    nodeGroups.set(color, group);
+  }
+  return group;
+}
+
 let drawNodes = function () {
   const glowIntensity = clamp(cfg.glowIntensity ?? 1, 0, 1);
   const glowEnabled = sceneTuning.glowEnabled && glowIntensity > 0;
@@ -1989,109 +2442,35 @@ let drawNodes = function () {
     node.__dofA = dofAlpha * (node.__depthAlpha || 1) * (node.__dim ? 0.22 : 1);
     node.__flare = node.ghost ? 0 : getFlareIntensity(node.id);
     node.__rad = node.r * dofScale * (node.__depthSize || 1);
-    const color = nodeColor(node);
-    let group = nodeGroups.get(color);
-    if (!group) { group = { low: [], high: [] }; nodeGroups.set(color, group); }
+    const group = nodeGroupFor(nodeColor(node));
     ((node.importance || 0) >= 0.3 || node.__flare > 0 ? group.high : group.low).push(node);
   }
 
   if (glowEnabled) {
     const chromatic = !!cfg.chromaticBloom && !REDUCED_MOTION;
+    const breathing = !!cfg.glowBreathing && !REDUCED_MOTION;
     const breathPhase = (performance.now() / 30000) * Math.PI * 2;
+    // Keep every colour drawn this frame in the sprite cache (see
+    // GLOW_SPRITE_CACHE_MAX).
+    let liveColors = 0;
+    for (const group of nodeGroups.values()) if (group.low.length || group.high.length) liveColors++;
+    GLOW_SPRITE_CACHE_MAX = Math.min(GLOW_SPRITE_CACHE_HARD_MAX, Math.max(GLOW_SPRITE_CACHE_MIN, liveColors + 16));
     // On dark backgrounds glow is light: additive blending makes overlapping
     // hubs brighter instead of muddier.
     if (themeIsDark()) ctx.globalCompositeOperation = 'lighter';
-    for (const [color, group] of nodeGroups) {
+    for (const group of nodeGroups.values()) {
       if (!group.low.length && !group.high.length) continue;
-      const sprite = getGlowSprite(color, chromatic, cfg.chromaticBloomIntensity);
-      for (const list of [group.low, group.high]) {
-        for (let i = 0; i < list.length; i++) {
-          const node = list[i];
-          if (node.ghost) continue;
-          let glowRadius = (node.__rad + 3 + Math.sqrt(node.__rad)) * sceneTuning.glowScale * glowIntensity;
-          // Breathing is wall-clock based so the ~30s cycle is the same at any fps.
-          if (cfg.glowBreathing && !REDUCED_MOTION) {
-            glowRadius *= 1 + Math.sin(breathPhase * cfg.glowBreathingSpeed + node.__breathOffset) * cfg.glowBreathingDepth;
-          }
-          if (!(glowRadius > 0)) continue;
-          const glowAlpha = (0.08 + (node.importance || 0) * 0.15 + node.__pulse * 0.03 + node.__flare * 0.4) * node.__dofA * glowIntensity;
-          if (glowAlpha <= 0) continue;
-          ctx.globalAlpha = Math.min(1, glowAlpha);
-          ctx.drawImage(sprite, node.__fx - glowRadius, node.__fy - glowRadius, glowRadius * 2, glowRadius * 2);
-        }
-      }
+      const sprite = getGlowSprite(group.color, chromatic, cfg.chromaticBloomIntensity);
+      drawGlowList(group.low, sprite, glowIntensity, breathing, breathPhase);
+      drawGlowList(group.high, sprite, glowIntensity, breathing, breathPhase);
     }
     ctx.globalCompositeOperation = 'source-over';
     ctx.globalAlpha = 1;
   }
 
   const shapes = !!cfg.tagShapes;
-  const drawCoreList = (list, cr, cg, cb, baseColor) => {
-    for (const b of BUCKETS) b.length = 0;
-    const hiBuckets = drawCoreList.hi;
-    for (const b of hiBuckets) b.length = 0;
-    for (let i = 0; i < list.length; i++) {
-      const node = list[i];
-      const ghostDim = node.ghost ? 0.35 : 1;
-      const coreAlpha = Math.min(1, (0.55 + (node.importance || 0) * 0.35 + node.__pulse * 0.1 + node.__flare * 0.4) * node.__dofA * ghostDim);
-      if (node.__flare > 0) {
-        const f = node.__flare;
-        ctx.fillStyle = rgba(Math.min(255, cr + Math.floor(f * 200)), Math.min(255, cg + Math.floor(f * 200)), Math.min(255, cb + Math.floor(f * 200)), coreAlpha);
-        ctx.beginPath();
-        addShapePath(ctx, shapes ? node.__shape : 0, node.__fx, node.__fy, node.__rad);
-        ctx.fill();
-        if (!node.ghost) {
-          ctx.fillStyle = rgba(Math.min(255, cr + 80 + Math.floor(f * 175)), Math.min(255, cg + 80 + Math.floor(f * 175)), Math.min(255, cb + 80 + Math.floor(f * 175)), Math.min(1, (0.7 + node.__pulse * 0.3) * node.__dofA));
-          ctx.beginPath();
-          ctx.arc(node.__fx, node.__fy, node.__rad * 0.4, 0, Math.PI * 2);
-          ctx.fill();
-        }
-        continue;
-      }
-      BUCKETS[Math.max(1, Math.min(8, Math.round(coreAlpha * 8)))].push(node);
-      if (!node.ghost && (node.importance || 0) > 0.3) {
-        hiBuckets[Math.max(1, Math.min(8, Math.round(Math.min(1, (0.7 + node.__pulse * 0.3) * node.__dofA) * 8)))].push(node);
-      }
-    }
-    ctx.fillStyle = baseColor;
-    for (let b = 1; b <= 8; b++) {
-      const batch = BUCKETS[b];
-      if (!batch.length) continue;
-      ctx.globalAlpha = b / 8;
-      ctx.beginPath();
-      for (let i = 0; i < batch.length; i++) {
-        const node = batch[i];
-        addShapePath(ctx, shapes ? node.__shape : 0, node.__fx, node.__fy, node.__rad);
-      }
-      ctx.fill();
-    }
-    ctx.fillStyle = rgba(Math.min(255, cr + 80), Math.min(255, cg + 80), Math.min(255, cb + 80), 1);
-    for (let b = 1; b <= 8; b++) {
-      const batch = hiBuckets[b];
-      if (!batch.length) continue;
-      ctx.globalAlpha = b / 8;
-      ctx.beginPath();
-      for (let i = 0; i < batch.length; i++) {
-        const node = batch[i];
-        ctx.moveTo(node.__fx + node.__rad * 0.4, node.__fy);
-        ctx.arc(node.__fx, node.__fy, node.__rad * 0.4, 0, Math.PI * 2);
-      }
-      ctx.fill();
-    }
-    ctx.globalAlpha = 1;
-  };
-  drawCoreList.hi = drawNodes.__hi || (drawNodes.__hi = Array.from({ length: 9 }, () => []));
-
-  for (const [color, group] of nodeGroups) {
-    if (!group.low.length) continue;
-    const [cr, cg, cb] = hexToRGB(color);
-    drawCoreList(group.low, cr, cg, cb, color);
-  }
-  for (const [color, group] of nodeGroups) {
-    if (!group.high.length) continue;
-    const [cr, cg, cb] = hexToRGB(color);
-    drawCoreList(group.high, cr, cg, cb, color);
-  }
+  for (const group of nodeGroups.values()) if (group.low.length) drawCoreList(group.low, group, shapes);
+  for (const group of nodeGroups.values()) if (group.high.length) drawCoreList(group.high, group, shapes);
 };
 
 // Glow labels are pre-rendered sprites: shadowBlur per label per frame was
@@ -2128,10 +2507,14 @@ function labelSprite(text, font, fontSize, glowColor, chromatic) {
   return s;
 }
 
+// Placed label boxes as flat x, y, w, h runs, reused across frames.
+const __placedBoxes = [];
 let drawLabels = function () {
   if (!cfg.hubLabels || sceneTuning.labelCount <= 0) return;
-  const placed = [];
+  const placed = __placedBoxes;
+  placed.length = 0;
   let drawn = 0;
+  const fontStack = labelFontStack();
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   const recentMode = cfg.labelSource === 'recent';
@@ -2143,7 +2526,8 @@ let drawLabels = function () {
   for (let i = 0; i < labelCandidates.length; i++) {
     const node = labelCandidates[i];
     if (drawn >= sceneTuning.labelCount) break;
-    if (!recentMode && (node.importance || 0) < sceneTuning.labelMinImportance) continue;
+    // Candidates are sorted by importance, so nothing after this one qualifies.
+    if (!recentMode && (node.importance || 0) < sceneTuning.labelMinImportance) break;
     if (node.__vFrame !== tick || !node.__hasPoint) continue;
     const dofAlpha = sceneTuning.depthOfFieldEnabled ? 1 - distFromCenterPoint(node.__fx, node.__fy) * 0.4 : 1;
     if (dofAlpha <= 0.12) continue;
@@ -2151,18 +2535,22 @@ let drawLabels = function () {
     let label = node.__labelText;
     if (recentMode) label += '  ·  ' + SceneKit.ago(nodeDays(node));
     const fontSize = node.__labelFontSize;
-    const font = `${fontSize}px ${labelFontStack()}`;
+    const font = node.__labelFont || `${fontSize}px ${fontStack}`;
     ctx.font = font;
     const textWidth = recentMode ? ctx.measureText(label).width : node.__labelWidth || ctx.measureText(label).width;
     const x = node.__fx;
     const y = node.__fy + node.r + 16;
-    const box = { x: x - textWidth / 2 - 8, y: y - fontSize / 2 - 5, w: textWidth + 16, h: fontSize + 10 };
-    if (box.x < 10 || box.x + box.w > innerWidth - 10 || box.y < 10 || box.y + box.h > innerHeight - 10) continue;
-    if (placed.some(o => !(box.x + box.w < o.x || o.x + o.w < box.x || box.y + box.h < o.y || o.y + o.h < box.y))) continue;
+    const bx = x - textWidth / 2 - 8, by = y - fontSize / 2 - 5, bw = textWidth + 16, bh = fontSize + 10;
+    if (bx < 10 || bx + bw > innerWidth - 10 || by < 10 || by + bh > innerHeight - 10) continue;
+    let overlaps = false;
+    for (let j = 0; j < placed.length; j += 4) {
+      if (!(bx + bw < placed[j] || placed[j] + placed[j + 2] < bx || by + bh < placed[j + 1] || placed[j + 1] + placed[j + 3] < by)) { overlaps = true; break; }
+    }
+    if (overlaps) continue;
 
     const [cr, cg, cb] = hexToRGB(nodeColor(node));
     if (mode === 'badge') {
-      roundedRectPath(box.x, box.y, box.w, box.h, 10);
+      roundedRectPath(bx, by, bw, bh, 10);
       ctx.fillStyle = rgba(mixChannel(br, cr, 0.12), mixChannel(bg, cg, 0.12), mixChannel(bb, cb, 0.12), bgAlpha * dofAlpha);
       ctx.fill();
       ctx.strokeStyle = rgba(cr, cg, cb, 0.25 * dofAlpha);
@@ -2178,7 +2566,7 @@ let drawLabels = function () {
       ctx.drawImage(s.c, x - s.w / 2, y + 0.5 - s.h / 2, s.w, s.h);
       ctx.globalAlpha = 1;
     } else if (mode === 'inherit') {
-      roundedRectPath(box.x, box.y, box.w, box.h, 10);
+      roundedRectPath(bx, by, bw, bh, 10);
       ctx.fillStyle = rgba(cr, cg, cb, 0.22 * dofAlpha);
       ctx.fill();
       ctx.fillStyle = textColor;
@@ -2187,7 +2575,7 @@ let drawLabels = function () {
       ctx.fillStyle = textColor;
       ctx.fillText(label, x, y + 0.5);
     }
-    placed.push(box);
+    placed.push(bx, by, bw, bh);
     drawn += 1;
   }
 };
@@ -2200,6 +2588,8 @@ let sceneCache = null;
 let configStamp = 0;
 function rebuildScene() {
   sceneDirty = false;
+  // A new scene object starts with no clusters; force buildScene to redo them.
+  __clusterKey = '';
   const list = [];
   for (const n of nodes) if (n.__renderable !== false) list.push(n);
   const index = new Map();
@@ -2218,7 +2608,7 @@ function rebuildScene() {
     return {
       i, id: n.id, src: n, x: 0, y: 0, bx: 0, by: 0, r: 0,
       ci,
-      uc: (mode === 'tag' || mode === 'recency') && n.tag && cfg.tagColors[n.tag] ? cfg.tagColors[n.tag] : null,
+      uc: (mode === 'tag' || mode === 'recency') && n.tag ? ownValue(cfg.tagColors, n.tag) : null,
       dim: !!n.__dim,
       ghost: !!n.ghost,
       imp: n.importance || 0,
@@ -2233,6 +2623,8 @@ function rebuildScene() {
       tag: n.tag || ''
     };
   });
+  const idIndex = new Map();
+  for (const n of sn) if (!n.ghost) idIndex.set(n.id, n.i);
   const sl = [];
   for (let i = 0; i < links.length; i++) {
     const a = index.get(links[i].source), b = index.get(links[i].target);
@@ -2266,7 +2658,7 @@ function rebuildScene() {
   const bfsCache = new Map();
   const plainAdj = adj.map(a => a.map(x => x[0]));
   sceneCache = {
-    nodes: sn, links: sl, hubs, recents, clusters: [],
+    nodes: sn, links: sl, hubs, recents, clusters: [], idIndex, activeIndex: -1,
     stats: vaultStats(),
     bfs(src) {
       let d = bfsCache.get(src);
@@ -2287,6 +2679,10 @@ function rebuildScene() {
 }
 
 let __clusterKey = '';
+// The scene object S handed to scene themes. Besides nodes/links/hubs/
+// recents/clusters it carries S.activeIndex: the index into S.nodes of the
+// note open in Obsidian (bridge plugin, highlightActiveNote on), or -1. A
+// theme can mark that node; it changes without a scene rebuild.
 function buildScene() {
   if (sceneDirty || !sceneCache) rebuildScene();
   const S = sceneCache;
@@ -2321,6 +2717,13 @@ function buildScene() {
   S.o = { labels: cfg.hubLabels ? cfg.labelSource : 'off', colorBy: cfg.nodeColorMode, overlay: cfg.overlay };
   S.pal = palette;
   S.cfg = cfg;
+  // Large-vault budgets, so scene themes can honour the same caps as the
+  // default pipeline: draw every linkStep-th link, at most labelCount labels.
+  S.linkStep = Math.max(1, sceneTuning.linkStep | 0);
+  S.labelCount = Math.max(0, sceneTuning.labelCount | 0);
+  S.labelMinImportance = sceneTuning.labelMinImportance || 0;
+  const activeIdx = activeNoteId && cfg.highlightActiveNote ? S.idIndex.get(activeNoteId) : undefined;
+  S.activeIndex = activeIdx === undefined ? -1 : activeIdx;
   return S;
 }
 
@@ -2330,21 +2733,35 @@ if (PERF_ENABLED) {
   drawNodes = __perfWrap('drawNodes', drawNodes);
 }
 
+// One options object and module-level callbacks: the per-frame closures
+// are gone, and the GL renderer only rebuilds colours/sizes when staticKey
+// changes and only re-uploads positions when posKey changes.
+const __glInclude = n => n.__renderable !== false;
+const __glNodeAlpha = n => (n.ghost ? 0.35 : 0.85) * (n.__dim ? 0.22 : 1);
+let __glSizeScale = 1;
+const __glNodeSize = n => (n.r * 2 + 2) * __glSizeScale;
+const __glOpts = {
+  nodes: null, links: null, linkStep: 1,
+  include: __glInclude, colorOf: nodeColor, edgeColorOf: edgeColor, nodeAlpha: __glNodeAlpha, nodeSize: __glNodeSize,
+  edgeAlpha: 0, additive: false, glow: 0, staticKey: '', posKey: ''
+};
 function drawGL() {
-  const dark = themeIsDark();
   const glowIntensity = sceneTuning.glowEnabled ? clamp(cfg.glowIntensity ?? 1, 0, 1) : 0;
-  __drawnNodes = glRenderer.draw({
-    nodes, links,
-    linkStep: sceneTuning.linkStep,
-    visible: n => n.__vFrame === tick && n.__hasPoint,
-    colorOf: n => nodeColor(n),
-    edgeColorOf: l => edgeColor(l),
-    edgeAlpha: Math.min(1, cfg.linkOpacity * sceneTuning.linkOpacityScale * 0.9),
-    nodeAlpha: n => (n.ghost ? 0.35 : 0.85) * (n.__dim ? 0.22 : 1),
-    nodeSize: n => (n.r * 2 + 2) * (glowIntensity > 0 ? 2.2 : 1.2),
-    additive: dark,
-    glow: glowIntensity * 0.6
-  });
+  __glSizeScale = glowIntensity > 0 ? 2.2 : 1.2;
+  const o = __glOpts;
+  o.nodes = nodes;
+  o.links = renderLinks;
+  o.linkStep = sceneTuning.linkStep;
+  o.edgeAlpha = Math.min(1, cfg.linkOpacity * sceneTuning.linkOpacityScale * 0.9);
+  o.additive = themeIsDark();
+  o.glow = glowIntensity * 0.6;
+  // Everything the colours, sizes and drawn set depend on bumps one of these.
+  o.staticKey = graphEpoch + '|' + renderEpoch + '|' + configStamp + '|' + sceneTuning.linkStep;
+  // Positions only hold still with no drift, no running layout and no
+  // framing change; otherwise rewrite them every frame.
+  const motionless = sceneTuning.motion.driftAmp === 0 || REDUCED_MOTION;
+  o.posKey = motionless && !simRunning ? o.staticKey + '|' + framingEpoch + '|' + innerWidth + 'x' + innerHeight : '';
+  __drawnNodes = glRenderer.draw(o);
 }
 
 function draw() {
@@ -2378,11 +2795,12 @@ function draw() {
       drawGL();
       drawParticles();
       drawAmbientParticles();
+      drawActiveRing();
     } else {
       if (hooks && hooks.drawEdges) hooks.drawEdges(); else drawEdges();
       if (hooks && hooks.drawParticles) hooks.drawParticles();
       else { drawAmbientParticles(); drawParticles(); }
-      if (hooks && hooks.drawNodes) hooks.drawNodes(); else drawNodes();
+      if (hooks && hooks.drawNodes) hooks.drawNodes(); else { drawNodes(); drawActiveRing(); }
     }
     if (hooks && hooks.drawLabels) hooks.drawLabels(); else drawLabels();
   }
@@ -2404,48 +2822,73 @@ function stopStateSync() {
   }
 }
 
+// Versions restart at 1 whenever the server restarts, so any *different*
+// version means "changed", not only a higher one.
 async function pollStateVersions() {
   const state = await loadJson('/api/state');
   if (!state) return;
-  if (state.graphVersion && state.graphVersion > lastSeenGraphVersion) {
+  if (state.graphVersion && state.graphVersion !== lastSeenGraphVersion) {
     lastSeenGraphVersion = state.graphVersion;
     await loadGraph();
   }
-  if (state.configVersion && state.configVersion > lastSeenConfigVersion) {
+  if (state.configVersion && state.configVersion !== lastSeenConfigVersion) {
     lastSeenConfigVersion = state.configVersion;
+    configStamp++;
     await loadCfg();
   }
+  await loadActiveNote();
+  // The server answers again: try the push stream, but not more than once a
+  // minute in case something between us and the server keeps refusing it.
+  if ('EventSource' in window && performance.now() - lastSseAttemptAt > 60000) startStateSync();
 }
 
+let lastSseAttemptAt = -Infinity;
+let sseHelloCount = 0;
 function startStateSync() {
   stopStateSync();
   if (SYNTHETIC_SIZE > 0 || ONESHOT) return;
   if ('EventSource' in window) {
+    lastSseAttemptAt = performance.now();
     eventSource = new EventSource('/events');
-    eventSource.addEventListener('hello', (e) => {
-      try {
-        const data = JSON.parse(e.data);
-        if (data.graphVersion) lastSeenGraphVersion = data.graphVersion;
-        if (data.configVersion) lastSeenConfigVersion = data.configVersion;
-      } catch (err) {}
+    eventSource.addEventListener('hello', async (e) => {
+      let data = {};
+      try { data = JSON.parse(e.data); } catch (err) {}
+      // The first hello is the page's own boot, which already loaded both.
+      // Any later hello is a reconnect: the server may have restarted, and
+      // the vault or config may have changed while we were disconnected.
+      const reconnect = sseHelloCount++ > 0;
+      const graphChanged = data.graphVersion !== lastSeenGraphVersion;
+      const configChanged = data.configVersion !== lastSeenConfigVersion;
+      if (data.graphVersion) lastSeenGraphVersion = data.graphVersion;
+      if (data.configVersion) lastSeenConfigVersion = data.configVersion;
+      if (!reconnect) return;
+      if (configChanged) { configStamp++; await loadCfg(); }
+      if (graphChanged) await loadGraph(); // ETag makes an unchanged graph a 304
+      await loadActiveNote();
     });
     eventSource.addEventListener('graph', async (e) => {
       try {
         const data = JSON.parse(e.data);
-        if (data.version) lastSeenGraphVersion = Math.max(lastSeenGraphVersion, data.version);
+        if (data.version) lastSeenGraphVersion = data.version;
       } catch (err) {}
       await loadGraph();
+    });
+    eventSource.addEventListener('active', (e) => {
+      try { setActiveNote(JSON.parse(e.data).id); } catch (err) {}
     });
     eventSource.addEventListener('config', async (e) => {
       try {
         const data = JSON.parse(e.data);
-        if (data.version) lastSeenConfigVersion = Math.max(lastSeenConfigVersion, data.version);
+        if (data.version) lastSeenConfigVersion = data.version;
       } catch (err) {}
       configStamp++;
       await loadCfg();
     });
     eventSource.onerror = () => {
       if (!eventSource) return;
+      // While CONNECTING the browser is already retrying on its own (with the
+      // server's retry delay); only a CLOSED stream has given up for good.
+      if (eventSource.readyState !== EventSource.CLOSED) return;
       stopStateSync();
       stateSyncTimer = setInterval(pollStateVersions, Math.max(1000, cfg.refreshMs));
     };
@@ -2462,13 +2905,31 @@ function startStateSync() {
 //     maxFps (0 = "still": 30 fps only while something is changing)
 //   - calm: idleFps; 0 holds the last frame and stops the loop entirely
 //   - hidden: no frames; visibilitychange wakes it
+// Flares end by time. They used to be removed only inside drawNodes, which
+// never runs for scene/hooks/WebGL themes or when flares are disabled, so one
+// new note could keep the loop at maxFps until it was deleted.
+function pruneFlares(now) {
+  for (const [id, f] of flares) if (now - f.start > f.duration) flares.delete(id);
+}
+
 function isSceneCalm() {
+  const now = performance.now();
+  if (flares.size) pruneFlares(now);
   if (simRunning || flares.size > 0 || __fadeActive || framingAnimating) return false;
-  if (performance.now() - lastConfigChangeAt < 3000) return false;
+  if (now - lastConfigChangeAt < 3000) return false;
   return true;
 }
 
+// Themes whose look *is* motion (LED, Mycelium, Phosphor, Synapse) set
+// alwaysAnimate; at the plain idle rate they would stutter or freeze.
+const ANIMATED_THEME_MIN_FPS = 15;
+function themeAlwaysAnimates() {
+  const t = activeTheme();
+  return !!(t && t.alwaysAnimate) && !REDUCED_MOTION;
+}
+
 let loopScheduled = false;
+let loopViaTimer = false;
 let loopTimer = null;
 let lastFrameAt = 0;
 function wake() {
@@ -2486,18 +2947,27 @@ function targetFps() {
   const max = cfg.maxFps | 0;
   if (!calm) return max > 0 ? max : 30;
   if (max === 0) return 0;
-  return Math.min(max, cfg.idleFps | 0);
+  const idle = cfg.idleFps | 0;
+  // idleFps 0 is an explicit "hold the frame", so it wins even here.
+  if (idle > 0 && themeAlwaysAnimates()) return Math.min(max, Math.max(idle, ANIMATED_THEME_MIN_FPS));
+  return Math.min(max, idle);
 }
 
 let __lastDrawError = 0;
 function frameLoop(now) {
   loopScheduled = false;
-  if (document.hidden && !EXPORT_MODE) return; // visibilitychange calls wake()
+  // visibilitychange / the host's resume signal call wake()
+  if ((document.hidden || hostPaused) && !EXPORT_MODE) return;
   const fps = targetFps();
   const dt = lastFrameAt ? Math.min(250, now - lastFrameAt) : 16.67;
   // rAF runs at the display rate (often 120/144 Hz); skip frames that come
   // earlier than the cap allows, at every cap including 60.
-  if (fps > 0 && lastFrameAt && now - lastFrameAt < 1000 / fps - 2) {
+  // Only frames chained straight off rAF need this check; a frame that came
+  // through the idle timer has already waited, and skipping it would wait a
+  // whole extra period (halving low idle rates).
+  const viaTimer = loopViaTimer;
+  loopViaTimer = false;
+  if (!viaTimer && fps > 0 && lastFrameAt && now - lastFrameAt < 1000 / fps - 2) {
     scheduleNext(fps, now);
     return;
   }
@@ -2514,11 +2984,24 @@ function frameLoop(now) {
     // keep the loop alive at a low rate so a later config change can recover.
     failed = true;
     if (now - __lastDrawError > 10000) { __lastDrawError = now; console.warn('draw failed:', e && e.message ? e.message : e); }
-    try { ctx.restore(); } catch (_) {}
+    const theme = activeTheme();
+    if (theme && ++themeFailures >= THEME_MAX_CONSECUTIVE_FAILURES) {
+      console.warn(`theme ${cfg.theme} keeps failing; drawing the default theme until the next settings change`);
+      brokenThemes.add(cfg.theme);
+      themeFailures = 0;
+      sceneDirty = true;
+    }
+    // Undo whatever the theme left behind (unbalanced save(), clip(),
+    // transforms). reset() clears all of it where supported.
+    try {
+      if (typeof ctx.reset === 'function') ctx.reset();
+      else for (let i = 0; i < 32; i++) ctx.restore();
+    } catch (_) {}
     ctx.setTransform(renderScale, 0, 0, renderScale, 0, 0);
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
   }
+  if (!failed) themeFailures = 0;
   if (PERF_ENABLED) { __perfRecord('frame', performance.now() - t0); __perfFrame(); }
   const next = targetFps();
   scheduleNext(failed ? Math.max(1, Math.min(next || 1, 2)) : next, now);
@@ -2529,24 +3012,52 @@ function scheduleNext(fps, now) {
   loopScheduled = true;
   const delay = 1000 / fps - (performance.now() - now) - 4;
   if (delay <= 8) { requestAnimationFrame(frameLoop); return; }
-  loopTimer = setTimeout(() => { loopTimer = null; requestAnimationFrame(frameLoop); }, delay);
+  loopTimer = setTimeout(() => { loopTimer = null; loopViaTimer = true; requestAnimationFrame(frameLoop); }, delay);
 }
 
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) { lastFrameAt = 0; markConfigChanged(); }
 });
 
+// Wallpaper-host pause signals. Hosts often keep a covered or paused page
+// "visible", so document.hidden alone never fires and the loop keeps drawing
+// frames nobody sees.
+// Lively: with "--pause-event true" in the wallpaper's LivelyInfo.json
+// Arguments, Lively calls this global with '{"IsPaused": true|false}' when it
+// pauses (fullscreen app, battery, etc.). Lively only stops *rendering* on
+// pause and keeps running page JS, so without this the loop burns CPU.
+let hostPaused = false;
+window.livelyWallpaperPlaybackChanged = function (data) {
+  let paused;
+  try { paused = !!(typeof data === 'string' ? JSON.parse(data) : data).IsPaused; } catch (_) { return; }
+  if (paused === hostPaused) return;
+  hostPaused = paused;
+  if (!paused) { lastFrameAt = 0; markConfigChanged(); }
+};
+
 // Clock-driven changes: theme rotation and time-of-day tint/palette.
 let __lastDayKey = dayKey();
+let __lastHourKey = Math.floor(Date.now() / 3600000);
 setInterval(() => {
   if (ONESHOT || SYNTHETIC_SIZE > 0) return;
   reapplyEffectiveConfig(false);
+  // Retry a theme whose script failed to load (e.g. the server was restarting).
+  if (cfg.theme && cfg.theme !== 'default' && !(window.THEMES && THEMES[cfg.theme])) ensureTheme(cfg.theme);
   // focusNote 'today' (and recency colours) depend on the date.
   const today = dayKey();
   if (today !== __lastDayKey) {
     __lastDayKey = today;
-    refreshSceneTuning();
+    refreshSceneTuning(true);
     markConfigChanged();
+  }
+  // Scene nodes carry days/recent (and recency colours depend on note age);
+  // refresh them hourly so they don't go stale between graph reloads.
+  const hour = Math.floor(Date.now() / 3600000);
+  if (hour !== __lastHourKey) {
+    __lastHourKey = hour;
+    sceneDirty = true;
+    if (cfg.nodeColorMode === 'recency') refreshSceneTuning();
+    wake();
   }
 }, 30000);
 
@@ -2565,7 +3076,8 @@ async function exportPng() {
   g.fillStyle = cfg.background;
   g.fillRect(0, 0, w, h);
   if (bgCanvas.style.display !== 'none') g.drawImage(bgCanvas, 0, 0, w, h);
-  if (glActive) g.drawImage(glCanvas, 0, 0, w, h);
+  // No preserved drawing buffer: re-issue the GL frame in this task first.
+  if (glActive && glRenderer) { glRenderer.redraw(); g.drawImage(glCanvas, 0, 0, w, h); }
   g.drawImage(canvas, 0, 0);
   const tint = cfg.timeOfDay === 'tint' ? timeOfDayTint(currentHour()) : null;
   if (tint) { g.globalCompositeOperation = tint.op; g.globalAlpha = tint.alpha; g.fillStyle = tint.color; g.fillRect(0, 0, w, h); }
@@ -2614,6 +3126,7 @@ applyBackground();
     return;
   }
   if (EXPORT_MODE) { startStateSync(); wake(); exportPng(); return; }
+  await loadActiveNote();
   startStateSync();
   wake();
 })();

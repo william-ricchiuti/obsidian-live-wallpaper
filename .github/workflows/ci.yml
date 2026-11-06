@@ -14,12 +14,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node: [20, 22]
+        # 20.19 is the floor (chokidar 5 requires >=20.19); 22 and 24 are LTS.
+        node: ['20.19', 22, 24]
     steps:
       - uses: actions/checkout@v7
 
       - name: Use Node ${{ matrix.node }}
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node }}
           cache: npm

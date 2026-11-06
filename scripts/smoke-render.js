@@ -7,8 +7,10 @@
 //      oneshot mode — catches the "silently blank frame" class of regression).
 //
 // Chrome is located cross-platform (see find-chrome.js). If no Chrome is found
-// the test SKIPS with exit 0, so `npm test` stays green on machines without a
-// browser; CI runners (which have Chrome) exercise it for real.
+// the test SKIPS with exit 0 locally, so `npm test` stays green on machines
+// without a browser. In CI (process.env.CI set) or with OLW_REQUIRE_CHROME=1 a
+// missing Chrome is a FAILURE, so a broken Chrome setup step can't silently
+// turn the render test into a no-op.
 
 const fs = require('fs');
 const os = require('os');
@@ -32,7 +34,20 @@ const OPTION_CASES = [
   ['webgl renderer', { renderer: 'webgl' }],
   ['framing none (legacy)', { framing: 'none' }]
 ];
-const PORT = 3997;
+const net = require('net');
+let PORT = 0; // picked at startup, see freePort()
+// A port nobody else holds right now. Fixed ports let a second copy of the app
+// (another checkout's test run, a running wallpaper) answer instead, and the
+// server's "already running" path then exits 0: a silent false pass.
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.unref();
+    srv.on('error', reject);
+    srv.listen(0, '127.0.0.1', () => { const { port } = srv.address(); srv.close(() => resolve(port)); });
+  });
+}
+
 
 function log(msg) { process.stdout.write(msg + '\n'); }
 
@@ -89,6 +104,12 @@ function buildUrl(presets, name) {
 async function main() {
   const chrome = findChrome();
   if (!chrome) {
+    const required = !!process.env.CI || process.env.OLW_REQUIRE_CHROME === '1';
+    if (required) {
+      console.error('smoke:render FAILED — no Chrome/Chromium found but one is required ' +
+        `(${process.env.CI ? 'CI is set' : 'OLW_REQUIRE_CHROME=1'}); set CHROME=/path/to/chrome`);
+      process.exit(1);
+    }
     log('smoke:render skipped — no Chrome/Chromium found (set CHROME=/path/to/chrome to enable)');
     return;
   }
@@ -102,6 +123,7 @@ async function main() {
   fs.writeFileSync(path.join(vault, 'A.md'), '#x\n[[B]]\n');
   fs.writeFileSync(path.join(vault, 'B.md'), 'b\n');
   const configPath = path.join(dir, 'config.json');
+  PORT = await freePort();
   fs.writeFileSync(configPath, JSON.stringify({ vaultPath: vault, port: PORT }));
 
   const app = await startApp({ configPath, outPath: path.join(dir, 'graph.json') });

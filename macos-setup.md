@@ -12,6 +12,27 @@
 
 ## Autostart the parser
 
+The easy way: install the CLI globally, then let it register a launchd agent
+for you (run this from the folder where you want the config file to live):
+
+```bash
+npm i -g obsidian-live-wallpaper
+olw install --vault /Users/YOU/path/to/your/vault
+```
+
+It writes the config, then `~/Library/LaunchAgents/com.obsidian-live-wallpaper.<id>.plist`
+(one per config file, so several vaults can coexist), loads it with `launchctl`,
+and prints the wallpaper URL to paste into Plash. The agent starts at login and
+restarts only after a crash. Logs go to `~/Library/Logs/obsidian-live-wallpaper-<id>.log`.
+
+- `olw install --dry-run …` prints the plist and the `launchctl` commands without doing anything.
+- `olw uninstall` (add `--config <file>` if you used one) stops and removes it.
+- `npx obsidian-live-wallpaper install --vault …` also works, but because npx
+  runs from a temporary cache that can be cleared, it stops and asks you to
+  install globally first (`--force` overrides that).
+
+### Manual setup (fallback)
+
 Save this as `~/Library/LaunchAgents/com.user.vaultwallpaper.plist`, edit the two paths, then run `launchctl load ~/Library/LaunchAgents/com.user.vaultwallpaper.plist`.
 
 Find your node path first: run `which node` in Terminal and paste the result below.
@@ -28,9 +49,18 @@ Find your node path first: run `which node` in Terminal and paste the result bel
   </array>
   <key>WorkingDirectory</key><string>/Users/YOU/path/to/obsidian-live-wallpaper</string>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
+  <!-- Restart only after a crash. A clean exit (for example "already running"
+       when another copy holds the port) must not be restarted, or launchd
+       relaunches it every 10 seconds forever. -->
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>StandardOutPath</key><string>/Users/YOU/Library/Logs/obsidian-live-wallpaper.log</string>
+  <key>StandardErrorPath</key><string>/Users/YOU/Library/Logs/obsidian-live-wallpaper.log</string>
 </dict></plist>
 ```
+
+The server's output (startup lines, `graph: … nodes` after each edit, errors)
+goes to `~/Library/Logs/obsidian-live-wallpaper.log`; open it in Console.app
+or run `tail -f ~/Library/Logs/obsidian-live-wallpaper.log`.
 
 **Common node paths:**
 - Apple Silicon (M1/M2/M3/M4): `/opt/homebrew/bin/node`
@@ -39,7 +69,7 @@ Find your node path first: run `which node` in Terminal and paste the result bel
 
 ## Troubleshooting
 
-- **Blank wallpaper**: check that `graph.json` exists in the project folder. If not, the parser isn't running or `vaultPath` is wrong.
+- **Blank wallpaper**: run `curl -s http://127.0.0.1:3000/graph.json | head -c 300` (or open that URL in a browser). If it doesn't answer, the server isn't running; if it answers with no nodes, check the server log (the terminal running it, or your launchd/pm2 log) for `vaultPath` or config errors. The graph is served from memory, so a `graph.json` file on disk isn't a reliable signal.
 - **Plash shows "file not found"**: make sure the parser is running and the URL is `http://127.0.0.1:3000`, not a `file:///` path.
 - **Nodes not updating**: confirm chokidar is watching by editing a note and checking the parser's terminal output.
-- **Performance**: if your vault is 2000+ notes, increase `refreshMs` to 10000 in `config.json`.
+- **Performance**: for large vaults (2000+ notes), lower `maxRenderedNodes` (the least important nodes are dropped first), lower `idleFps` (`0` holds the last frame once the layout settles) and `maxFps`, and try `"renderer": "webgl"` (`auto` only switches to WebGL above ~3,000 notes). `refreshMs` won't help: it is only the fallback polling interval used when the live update stream is unavailable.

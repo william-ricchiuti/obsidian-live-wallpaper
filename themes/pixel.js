@@ -5,6 +5,8 @@
   const K = SceneKit;
   const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
   const SHADES = [[15, 56, 15], [48, 98, 48], [139, 172, 15], [155, 188, 15]];
+  const GREY = [];
+  for (let v = 0; v < 256; v++) GREY.push(`rgb(${v},${v},${v})`);
   THEMES.pixel = {
     kind: 'scene', name: 'Pocket Pixel', dark: true, fg: '#9bbc0f', ghost: '#306230', motion: 0.8,
     background: '#0f380f', labelsBuiltIn: true, pal: ['#9bbc0f'],
@@ -26,11 +28,11 @@
       f.fillStyle = bg;
       f.fillRect(0, 0, lw, lh);
       f.setTransform(1 / px, 0, 0, 1 / px, 0, 0);
-      K.edgesBatched(f, S, () => '#4a4a4a', 0.55, px * 0.8, false);
+      K.edgesBatched(f, S, () => '#4a4a4a', 0.55, px * 0.8, false, null, 'pixel');
       const blink = Math.floor(t * 3) % 2;
       for (const n of S.nodes) {
-        const lum = n.ghost ? 95 : n.dim ? 120 : 150 + n.imp * 105;
-        f.fillStyle = `rgb(${lum},${lum},${lum})`;
+        const lum = n.ghost ? 95 : n.dim ? 120 : Math.round(150 + n.imp * 105);
+        f.fillStyle = GREY[lum];
         const r = Math.max(px * 0.6, n.r * (0.35 + n.imp * 0.5));
         f.fillRect(Math.round(n.x - r), Math.round(n.y - r), r * 2, r * 2);
         if (n.imp > 0.5 && blink) {
@@ -39,12 +41,25 @@
           f.fillRect(n.x - px * 0.5, n.y - r * 2.4, px, r * 4.8);
         }
       }
-      if (S.o.labels !== 'off' && k > 0.45) {
-        const list = S.o.labels === 'recent' ? S.recents : S.hubs;
-        f.font = `600 ${8 * px}px ${K.MONO}`;
+      // Labels are drawn into the low-res buffer so they dither with the rest.
+      const labels = K.labelList(S);
+      if (labels.length) {
+        const fs = 8 * px;
+        f.font = `600 ${fs}px ${K.MONO}`;
         f.fillStyle = '#fff';
         f.textBaseline = 'middle';
-        for (const n of list.slice(0, 5)) f.fillText(n.label.toUpperCase(), n.x + n.r + 6 * px, n.y);
+        const placed = [];
+        for (const n of labels) {
+          const txt = K.truncLabel(n.label).toUpperCase();
+          const w = f.measureText(txt).width, gap = n.r + 6 * px;
+          let x = n.x + gap;
+          if (x + w > W - 2 * px) x = n.x - gap - w;
+          const box = [x, n.y - fs / 2, x + w, n.y + fs / 2];
+          if (box[0] < 2 * px || box[2] > W - 2 * px || box[1] < 2 * px || box[3] > H - 2 * px) continue;
+          if (placed.some(b => !(box[2] < b[0] || b[2] < box[0] || box[3] < b[1] || b[3] < box[1]))) continue;
+          placed.push(box);
+          f.fillText(txt, x, n.y);
+        }
       }
       f.setTransform(1, 0, 0, 1, 0, 0);
       const img = f.getImageData(0, 0, lw, lh), d = img.data;

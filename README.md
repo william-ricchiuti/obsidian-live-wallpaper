@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/william-ricchiuti/obsidian-live-wallpaper/actions/workflows/ci.yml/badge.svg)](https://github.com/william-ricchiuti/obsidian-live-wallpaper/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Node](https://img.shields.io/badge/node-%E2%89%A520-43853d.svg)](https://nodejs.org)
+[![Node](https://img.shields.io/badge/node-%E2%89%A520.19-43853d.svg)](https://nodejs.org)
 
 > Turn your Obsidian vault into an ambient desktop scene instead of another hidden sidebar.
 
@@ -13,6 +13,18 @@
 Obsidian Live Wallpaper turns your vault graph into a live desktop backdrop: glowing nodes, tag-colored clusters, curated visual presets, smarter hub labels, and motion that stays atmospheric instead of noisy. It is built to feel like wallpaper first, graph tooling second.
 
 **macOS, Windows, and Linux.**
+
+## ✨ What's New in v1.3
+
+- **Exact Obsidian links and the open note.** The optional [Live Wallpaper Bridge](obsidian-plugin/README.md) plugin hands the wallpaper Obsidian's own link and tag index, so the graph matches Obsidian's graph view, and the note you have open is highlighted on your desktop (`highlightActiveNote`). Without the plugin, or when notes changed while Obsidian was closed, the server's own scan is used (`graphSource`).
+- **Start at login with one command:** `olw install --vault <path>` sets up launchd (macOS), a systemd user service (Linux) or Task Scheduler (Windows); `olw uninstall` removes it.
+- **Idles properly.** One new note used to keep the wallpaper at full frame rate until it was deleted; it now drops back to `idleFps`, which defaults to 5. Animated themes (LED, Mycelium, Phosphor, Synapse) keep a smooth 15 fps.
+- **Starts where it left off.** The settled layout is saved, so a reload, host restart or wake from sleep doesn't recompute or reshuffle the graph.
+- **Recovers on its own** after a server restart, a theme that fails to load or throws, or a GPU reset, and stops drawing while Lively pauses it.
+- **Closer to Obsidian:** links and tags inside code are ignored, `[text](Note.md)` links count, Unicode and digit tags work, tags merge regardless of case, and a `[[Note]]` with several same-named notes links to one.
+- **Faster on big vaults:** themes honour the large-vault limits and build heavy shapes once per layout; the WebGL path keeps its buffers between frames.
+
+See the [changelog](CHANGELOG.md) for everything else, including security hardening and the many bug fixes.
 
 ## ✨ What's New in v1.2
 
@@ -96,11 +108,11 @@ settings page — or use it as a starting point and tweak.
 
 ## Install
 
-You'll need [Node.js](https://nodejs.org) (v20+) and a wallpaper host app:
+You'll need [Node.js](https://nodejs.org) (v20.19 or newer) and a wallpaper host app:
 
 - **macOS**: [Plash](https://apps.apple.com/us/app/plash/id1494023538) (free, Mac App Store)
 - **Windows**: [Lively Wallpaper](https://www.rocksdanister.com/lively/) (free, open source)
-- **Linux**: KDE has native support; GNOME via [Hidamari](https://github.com/jeffshee/hidamari); tiling WMs via [xwinwrap](https://github.com/ujjwal96/xwinwrap)
+- **Linux**: KDE via the HTML Wallpaper plugin from the KDE Store; GNOME via [Hidamari](https://github.com/jeffshee/hidamari); tiling WMs via [xwinwrap](https://github.com/ujjwal96/xwinwrap)
 
 **Quickest start (no clone):**
 
@@ -110,6 +122,18 @@ npx obsidian-live-wallpaper --vault "/path/to/your/Obsidian/vault"
 
 This writes a small config in the current folder and starts the server. Then
 point your wallpaper host at the printed `http://127.0.0.1:3000` URL.
+
+**Start it at login:**
+
+```bash
+npm install -g obsidian-live-wallpaper
+olw install --vault "/path/to/your/Obsidian/vault"
+```
+
+`olw install` registers a per-user login item (launchd, systemd or Task Scheduler) that
+restarts the server if it crashes; `olw install --dry-run` shows what it would write, and
+`olw uninstall` removes it. Install globally first: an autostart pointing into the
+temporary `npx` cache would break when that cache is cleared.
 
 **Or clone it** (best if you want to customize or contribute):
 
@@ -139,6 +163,14 @@ Point your wallpaper host to `http://127.0.0.1:3000` (examples below assume the 
 
 Open `http://127.0.0.1:3000/settings.html` to customize the visual settings. `vaultPath` and `port` stay in `config.json`.
 
+### Exact links and the open note (optional Obsidian plugin)
+
+The [Live Wallpaper Bridge](obsidian-plugin/README.md) plugin in `obsidian-plugin/` writes
+Obsidian's own resolved links, tags and the currently open note to its plugin folder,
+and the server picks them up automatically. The graph then matches Obsidian exactly, and
+the note you're editing glows on the desktop. It isn't in the community plugin directory
+yet; the README there has the manual install steps.
+
 ### Use it inside Obsidian
 
 You can also use the graph as a background inside Obsidian itself with the [Live Background](https://github.com/DynamicPlayerSector/obsidian-live-background) community plugin. Point it at `http://127.0.0.1:3000`. For use behind notes, the **Plain**, **Blueprint**, or **Parchment** presets stay out of the way; **Ambient** or **Neon** work better as a standalone wallpaper.
@@ -153,14 +185,15 @@ For autostart and troubleshooting, see the platform-specific guides:
 Three layers, each ignorant of the others:
 
 ```
-┌──────────┐    graph.json    ┌──────────┐  127.0.0.1:3000  ┌────────────┐
-│  parser  │ ───────────────▶ │ renderer │ ───────────────▶ │ Plash /    │
-│ (Node)   │                  │  (d3)    │                  │ Lively     │
-└──────────┘                  └──────────┘                  └────────────┘
+┌──────────┐  HTTP + SSE on   ┌──────────┐   web page at    ┌────────────┐
+│  parser  │  127.0.0.1:3000  │ renderer │  127.0.0.1:3000  │ Plash /    │
+│ (Node)   │ ───────────────▶ │  (d3)    │ ───────────────▶ │ Lively     │
+└──────────┘ /graph.json,     └──────────┘                  └────────────┘
+             /api/config, /events
 ```
 
-1. **`parser.js`** watches your vault, parses `[[wikilinks]]` and tags from every `.md` file, and serves the graph and app on the local loopback interface (`127.0.0.1:3000` by default). Links resolve the way Obsidian does: case-insensitively, by path, and ignoring image and PDF embeds.
-2. **`index.html`** loads the graph and runs the layout in a Web Worker (`worker.js` + `layout-core.js`). It draws with the active theme from `themes/`, and updates live when your vault changes. Editing a note's text doesn't move anything; adding a note only relaxes the layout around it.
+1. **`parser.js`** watches your vault, parses `[[wikilinks]]` and tags from every `.md` file, and serves the graph and app on the local loopback interface (`127.0.0.1:3000` by default). The graph is held in memory and served at `/graph.json`; changes are pushed to the page over a server-sent-events stream, so nothing is handed off through files (a `graph.json` copy is only written next to the config at startup and shutdown, as a cold-start fallback and debugging aid). Links resolve the way Obsidian does: case-insensitively, by path, and ignoring image and PDF embeds. With the optional Obsidian plugin installed, the graph comes from Obsidian's own index instead, and the server falls back to its scan whenever notes changed while Obsidian was closed.
+2. **`index.html`** fetches the graph over HTTP and runs the layout in a Web Worker (`worker.js` + `layout-core.js`). It draws with the active theme from `themes/`, and updates live when your vault changes. Editing a note's text doesn't move anything; adding a note only relaxes the layout around it.
 3. **Plash / Lively** renders the page as your desktop wallpaper.
 
 The clean separation means only the host changes per platform.
@@ -174,19 +207,19 @@ The renderer ships with a local vendored copy of D3, so the wallpaper still work
 | Option | Default | Description |
 |--------|---------|-------------|
 | `vaultPath` | — | Absolute path to your Obsidian vault |
-| `port` | `3000` | Local HTTP port for the wallpaper server |
-| `accent` | `#7c5cff` | Default node and edge color |
+| `port` | `3000` | Local HTTP port for the wallpaper server (`1`–`65535`) |
+| `accent` | `#7c5cff` | Default node and edge color (6-digit hex, as for every color option) |
 | `background` | `#0a0a0f` | Canvas background color |
-| `refreshMs` | `5000` | Fallback refresh interval in ms when live updates are unavailable |
-| `linkOpacity` | `0.18` | Base opacity for graph edges |
+| `refreshMs` | `5000` | Fallback polling interval in ms, used only when the live update stream is unavailable (`1000`–`60000`) |
+| `linkOpacity` | `0.18` | Base opacity for graph edges (`0`–`1`) |
 | `nodeGlow` | `true` | Radial glow halo around each node |
 | `glowIntensity` | `1` | Glow halo strength (`0`–`1`); lower for flatter looks |
 | `edgeStyle` | `"line"` | Edge rendering: `line`, `curve`, or `none` |
 | `nodeColorMode` | `"tag"` | Node coloring: `tag` (by first tag), `age` (by modified time), `folder` (by top-level vault folder), or `recency` (tag colours, dimming notes older than `recencyDays`) |
 | `labelFont` | `"sans"` | Label typeface: `sans`, `mono`, or `serif` |
 | `particles` | `true` | Dots flowing along edges |
-| `particleSpeed` | `1` | Multiplier for particle travel speed |
-| `particleDensity` | `0.3` | Particle spawn density along links |
+| `particleSpeed` | `1` | Multiplier for particle travel speed (`0.1`–`3`) |
+| `particleDensity` | `0.3` | Particle spawn density along links (`0.05`–`1`) |
 | `motionMode` | `"balanced"` | Ambient movement profile: `still`, `light`, `balanced`, or `showcase` |
 | `clusterByTag` | `true` | Same-tag nodes gravitate together |
 | `clusterHalos` | `true` | Soft color fields behind major tag clusters |
@@ -195,8 +228,8 @@ The renderer ships with a local vendored copy of D3, so the wallpaper still work
 | `depthOfField` | `true` | Peripheral nodes dimmer and smaller |
 | `noteFlare` | `true` | New notes flash white when they appear |
 | `hubLabels` | `false` | Show names on most-connected nodes |
-| `hubLabelCount` | `5` | Maximum number of node labels shown when `hubLabels` is on |
-| `labelMinImportance` | `0.22` | Minimum node importance required before labels appear |
+| `hubLabelCount` | `5` | Maximum number of node labels shown when `hubLabels` is on (`1`–`50`) |
+| `labelMinImportance` | `0.22` | Minimum node importance required before labels appear (`0`–`1`) |
 | `autoScaleLargeVaults` | `true` | Automatically reduces particles, labels, and edge density on dense graphs |
 | `maxRenderedNodes` | `5000` | Hard cap on rendered nodes (`100`–`100000`); lowest-importance nodes drop first |
 | `showUnresolvedLinks` | `true` | Show ghost nodes for `[[links]]` to notes that don't exist yet |
@@ -219,26 +252,28 @@ The renderer ships with a local vendored copy of D3, so the wallpaper still work
 | `depthParallaxStrength` | `0.5` | Layer separation intensity (`0`–`1`) |
 | `depthParallaxLayers` | `3` | Number of depth layers (`2`–`4`) |
 | `theme` | `"default"` | Rendering theme: `default` or any file in `themes/` (`aurora`, `synapse`, `mycelium`, `phosphor`, `led`, `pixel`, `territories`, `survey`, `metro`, `riso`, `bauhaus`, `stitch`, `stained-glass`, `celestial`, `wash`, `sketch`) |
-| `labelStyle` | `{}` | Label styling: `mode` (`badge`, `glow`, `minimal`, `inherit`), `backgroundAlpha`, `glowColor`, `chromaticSplit`. The font comes from `labelFont`. |
+| `labelStyle` | `{}` | Label styling: `mode` (`badge`, `glow`, `minimal`, `inherit`), `backgroundAlpha`, `glowColor`, `chromaticSplit`. `backgroundAlpha` is `0`–`0.9`; `glowColor` is `accent`, `node` or a hex color. The font comes from `labelFont`. |
 | `layout` | `"force"` | `force`, `rings`, `timeline`, or `galaxy` |
 | `framing` | `"center"` | Where the graph sits: `center`, `fill`, `left`, `right`, or `none` (raw layout coordinates, the pre-1.2 behaviour) |
 | `zoom` | `1` | Extra scale on top of framing (`0.4`–`3`) |
 | `offsetX` / `offsetY` | `0` | Nudge the graph by up to half the framed area (`-1`–`1`) |
-| `safeArea` | all `0` | Pixels to keep clear on each side: `{ "top": 30, "right": 130, "bottom": 90, "left": 0 }` for a macOS menu bar, dock and icons |
+| `safeArea` | all `0` | Pixels to keep clear on each side (`0`–`1000` each): `{ "top": 30, "right": 130, "bottom": 90, "left": 0 }` for a macOS menu bar, dock and icons |
 | `palette` | `"auto"` | `auto` (the theme's own colours or `tagColors`), `aurora`, `riso`, `metro`, `pastel`, `earth`, `neon`, `viridis`, `mono`. `tagColors` always wins for the tags it names. |
-| `recencyDays` | `7` | Days a note counts as recent, for `recency` colouring and Synapse/Mycelium pulses |
+| `recencyDays` | `7` | Days a note counts as recent, for `recency` colouring and Synapse/Mycelium pulses (`1`–`365`) |
 | `timeOfDay` | `"off"` | `tint` (night, dawn and dusk colour wash) or `palette` (light colours from 07:00 to 19:00) |
 | `tagShapes` | `false` | Circle, square, triangle or diamond per tag in the default theme |
 | `grain` | `true` | Fine film grain; also hides gradient banding on large displays |
 | `vignette` | `false` | Darken the screen edges |
 | `overlay` | `"none"` | `clock`, `stats`, or `note` (note of the hour) |
 | `labelSource` | `"hubs"` | Label the most-linked notes, or the most `recent` edits |
-| `focusNote` | `""` | Show only this note's neighbourhood; `today` means today's daily note |
+| `focusNote` | `""` | Show only this note's neighbourhood; `today` means today's daily note (up to 300 characters) |
 | `focusHops` | `2` | How many links out from `focusNote` to show (`1`–`4`) |
-| `rotate` | `{ "themes": [], "everyMinutes": 60 }` | Cycle through these themes |
-| `maxFps` | `30` | Frame cap while something is changing; `0` = only redraw on change |
-| `idleFps` | `10` | Frame rate once the scene is settled; `0` = hold the last frame (near-zero CPU) |
+| `rotate` | `{ "themes": [], "everyMinutes": 60 }` | Cycle through these themes (up to 32 theme ids; `everyMinutes` `1`–`1440`) |
+| `maxFps` | `30` | Frame cap while something is changing (`0`–`60`); `0` = only redraw on change |
+| `idleFps` | `5` | Frame rate once the scene is settled (`0`–`30`); `0` = hold the last frame (near-zero CPU) |
 | `renderer` | `"auto"` | `auto` uses WebGL2 for vaults over ~3,000 notes; force `canvas` or `webgl` |
+| `graphSource` | `"auto"` | Where the graph comes from: `auto` (the Obsidian plugin's graph while it matches the vault, otherwise the scan), `scan`, or `obsidian` (always the plugin's graph when present) |
+| `highlightActiveNote` | `true` | Highlight the note open in Obsidian (needs the Obsidian plugin) |
 
 ### Tags vs links
 
@@ -250,7 +285,7 @@ With `showUnresolvedLinks` on (the default), any `[[wikilink]]` that points to a
 
 ### Duplicate note names
 
-If two markdown files share the same basename (e.g. `Index.md` in different folders), the parser automatically prefixes their node IDs with the folder path so both appear in the graph. A `[[Index]]` wikilink will connect to all notes named `Index`. Labels still show the short name.
+If two markdown files share the same basename (e.g. `Index.md` in different folders), the parser automatically prefixes their node IDs with the folder path so both appear in the graph. A bare `[[Index]]` links to one of them: the one in the same folder as the linking note, otherwise the one with the shortest path. That approximates Obsidian's rule; with the Obsidian plugin installed you get Obsidian's exact answer. Labels still show the short name.
 
 ### Coloring modes
 
@@ -301,11 +336,11 @@ Big graphs turn into mush if you render everything. With `autoScaleLargeVaults` 
 | 3,000–10,000 nodes | Glow and halos off, labels tighten, depth effects back off, render scale drops to stay smooth |
 | 10,000+ nodes | Particles off, halos off, labels limited to the biggest hubs, render scale drops further, hard cap of about 2,800 rendered nodes |
 
-If you want a tighter ceiling, set `maxRenderedNodes` — least-connected notes drop first.
+If you want a tighter ceiling, set `maxRenderedNodes` — least-connected notes drop first. These limits apply to every theme, not just the default renderer.
 
 ### Incremental parsing
 
-The first launch reads your whole vault. After that, normal edits only rebuild the parts of the graph that actually changed, so quick note updates do not trigger a full vault re-scan. Rapid saves are grouped together, and the wallpaper refreshes automatically as those changes land.
+The first launch reads your whole vault. After that, normal edits only rebuild the parts of the graph that actually changed, so quick note updates do not trigger a full vault re-scan. Rapid saves are grouped together, and the wallpaper refreshes automatically as those changes land. The settled layout is saved to `layout.json` next to your config, so restarting the server, the wallpaper host or your computer brings the graph back exactly where it was instead of laying it out again.
 
 ## License
 

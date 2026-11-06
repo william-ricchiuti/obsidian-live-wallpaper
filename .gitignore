@@ -7,3 +7,5 @@ Claude-Sessions/
 .env*
 *.tgz
 .vscode/
+layout.json
+custom-presets.json

@@ -85,8 +85,11 @@ const DEFAULTS = {
   rotate: { themes: [], everyMinutes: 60 },
   // Performance
   maxFps: 30,
-  idleFps: 10,
-  renderer: 'auto'
+  idleFps: 5,
+  renderer: 'auto',
+  // Obsidian bridge plugin (obsidian-plugin/)
+  graphSource: 'auto',
+  highlightActiveNote: true
 };
 const PUBLIC_FILES = new Map([
   ['/', path.join(__dirname, 'index.html')],
@@ -115,6 +118,7 @@ const TIME_OF_DAY = new Set(['off', 'tint', 'palette']);
 const OVERLAYS = new Set(['none', 'clock', 'stats', 'note']);
 const LABEL_SOURCES = new Set(['hubs', 'recent']);
 const RENDERERS = new Set(['auto', 'canvas', 'webgl']);
+const GRAPH_SOURCES = new Set(['auto', 'scan', 'obsidian']);
 
 // Themes are discovered from themes/*.js so the validator can never drift from
 // what the renderer can load. Files starting with "_" are shared helpers, and
@@ -147,11 +151,22 @@ const THEME_NAMES = new Set(THEME_LIST.map(t => t.id));
 const WIKILINK = /(!?)\[\[([^[\]|#]+)(?:[|#][^[\]]*)?\]\]/g;
 const NON_NOTE_EXT = /\.(png|jpe?g|gif|webp|svg|bmp|avif|heic|pdf|mp3|mp4|m4a|wav|ogg|webm|mov|canvas|excalidraw|base|csv|zip)$/i;
 const FRONTMATTER = /^---\r?\n([\s\S]*?)\r?\n---/;
-const TAGS_FLOW = /^tags:\s*\[([^\]]*)\]/m;
+// Obsidian accepts both `tags:` and `tag:`, as a [flow, list], a block list, or
+// a plain string ("a, b" or "a b").
+const TAGS_FLOW = /^tags?:[ \t]*\[([^\]\r\n]*)\]/m;
 // [ \t] rather than \s so the pattern can't backtrack across newlines
 // (CodeQL js/polynomial-redos on files with many "\n " repetitions).
-const TAGS_BLOCK = /^tags:[ \t]*\r?\n((?:[ \t]*-[ \t]+\S[^\r\n]*(?:\r?\n|$))+)/m;
-const TAGS_INLINE = /(?:^|\s)#([a-zA-Z][\w-/]*)/g;
+const TAGS_BLOCK = /^tags?:[ \t]*\r?\n((?:[ \t]*-[ \t]+\S[^\r\n]*(?:\r?\n|$))+)/m;
+const TAGS_STRING = /^tags?:[ \t]*([^\s[][^\r\n]*)$/m;
+// Obsidian tag characters: any letter or digit (not just ASCII), _, - and /
+// for nesting. A tag must contain at least one non-numeric character, so
+// #2024 is not a tag but #2024-review is (checked in isValidTag).
+const TAGS_INLINE = /(?:^|\s)#([\p{L}\p{N}_/-]+)/gu;
+// [text](target) markdown links. The link text excludes '[' as well as ']',
+// so a line of many '[' can't make each start rescan the rest of the line
+// (quadratic; CodeQL js/polynomial-redos). Same trick as WIKILINK above.
+const MD_LINK = /(!?)\[[^[\]\r\n]*\]\(([^()\r\n]*)\)/g;
+const URL_SCHEME = /^[a-z][a-z0-9+.-]*:/i;
 // vendor/d3.min.js is pinned by npm version and never changes without a
 // reinstall, so it's safe to cache long. worker.js/renderer-core.js are our
 // own app code and can change on an upgrade — a much shorter TTL keeps a
@@ -166,6 +181,26 @@ const EVENT_HEADERS = {
   Connection: 'keep-alive'
 };
 const MAX_BODY_BYTES = 1e6;
+// Sent by /api/state so a second instance can tell "our server already holds
+// the port" apart from an unrelated program.
+const APP_ID = 'obsidian-live-wallpaper';
+
+// Asks whatever is listening on `port` whether it is this app. Resolves true
+// only for a JSON /api/state reply carrying APP_ID.
+function probeOwnInstance(port, timeoutMs = 1500) {
+  return new Promise(resolve => {
+    const req = http.get({ host: '127.0.0.1', port, path: '/api/state', timeout: timeoutMs }, res => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', c => { if (body.length < 4096) body += c; });
+      res.on('end', () => {
+        try { resolve(JSON.parse(body).app === APP_ID); } catch (_) { resolve(false); }
+      });
+    });
+    req.on('timeout', () => { req.destroy(); resolve(false); });
+    req.on('error', () => resolve(false));
+  });
+}
 
 function noteId(basename, filePath, vaultPath, duplicatedBasenames) {
   if (!duplicatedBasenames.has(basename)) return basename;
@@ -232,7 +267,7 @@ function sanitizeTagColors(value) {
   if (!isPlainObject(value)) {
     throw new Error('tagColors must be an object of tag -> hex color');
   }
-  const sanitized = {};
+  const sanitized = Object.create(null);
   for (const [tag, color] of Object.entries(value)) {
     if (typeof tag !== 'string' || tag.trim() === '') {
       throw new Error('tagColors keys must be non-empty strings');
@@ -303,13 +338,38 @@ function validateRotate(value, key) {
   return out;
 }
 
-function isIgnoredPath(filePath, vaultPath, patterns) {
+// macOS (APFS/HFS+ default) and Windows file systems are case-insensitive, so
+// "Templates" in ignorePaths must also hide "templates/".
+const CASE_INSENSITIVE_FS = process.platform === 'win32' || process.platform === 'darwin';
+
+// "templates/", "\\Archive\\Old", "./drafts" -> "templates", "Archive/Old", "drafts".
+function normalizeIgnorePattern(pattern, caseInsensitive) {
+  let s = String(pattern).trim().replace(/[\\/]+/g, '/').replace(/^(\.\/)+/, '');
+  // Trim leading/trailing '/' by index: a /\/+$/ regex is quadratic on long
+  // slash runs (CodeQL js/polynomial-redos).
+  let start = 0, end = s.length;
+  while (start < end && s[start] === '/') start++;
+  while (end > start && s[end - 1] === '/') end--;
+  s = s.slice(start, end);
+  return caseInsensitive ? s.toLowerCase() : s;
+}
+
+// An ignorePaths entry matches a vault-relative path prefix ("Archive/Old"
+// hides everything under it) or any single path segment ("templates" hides
+// every folder or file of that name at any depth). '/' and '\\' are the same
+// separator; matching is case-insensitive on macOS and Windows.
+function isIgnoredPath(filePath, vaultPath, patterns, caseInsensitive = CASE_INSENSITIVE_FS) {
   if (!patterns || patterns.length === 0) return false;
-  const rel = path.relative(vaultPath, filePath);
-  if (!rel || rel.startsWith('..')) return true;
-  for (const p of patterns) {
-    if (rel === p || rel.startsWith(p + path.sep)) return true;
-    if (rel.split(path.sep).includes(p)) return true;
+  const relRaw = path.relative(vaultPath, filePath);
+  if (!relRaw || relRaw.startsWith('..')) return true;
+  let rel = relRaw.replace(/\\/g, '/');
+  if (caseInsensitive) rel = rel.toLowerCase();
+  const segments = rel.split('/');
+  for (const raw of patterns) {
+    const p = normalizeIgnorePattern(raw, caseInsensitive);
+    if (!p) continue;
+    if (rel === p || rel.startsWith(p + '/')) return true;
+    if (segments.includes(p)) return true;
   }
   return false;
 }
@@ -382,7 +442,9 @@ const VALIDATORS = {
   rotate:                 { fn: validateRotate },
   maxFps:                 { fn: validateInteger,  args: [0, 60] },
   idleFps:                { fn: validateInteger,  args: [0, 30] },
-  renderer:               { fn: validateEnum,     args: [RENDERERS] }
+  renderer:               { fn: validateEnum,     args: [RENDERERS] },
+  graphSource:            { fn: validateEnum,     args: [GRAPH_SOURCES] },
+  highlightActiveNote:    { fn: validateBoolean }
 };
 
 function sanitizePersistedConfig(raw) {
@@ -411,7 +473,7 @@ function sanitizeConfigPatch(raw) {
   }
   const patch = {};
   for (const [key, value] of Object.entries(raw)) {
-    const v = VALIDATORS[key];
+    const v = Object.hasOwn(VALIDATORS, key) ? VALIDATORS[key] : null;
     if (!v) {
       throw new Error(`unknown config key: ${key}`);
     }
@@ -438,25 +500,58 @@ function writeConfigFile(nextCfg, configPath = cfgPath) {
 // All tags on a note, in order: frontmatter first, then inline #tags. The
 // first one is the note's primary tag (used for clustering and colour); the
 // rest are kept so every tag is counted and can be coloured in settings.
+function isValidTag(tag) {
+  // At least one character that isn't a digit or a nesting slash.
+  return /[^\d/]/.test(tag) && !tag.startsWith('/') && !tag.endsWith('/');
+}
+
+// Blanks out fenced code blocks (``` or ~~~, unclosed runs to the end like
+// Obsidian) and inline `code` spans, so links and #tags written inside code
+// aren't counted. A line scanner rather than one big regex, to stay linear.
+function stripCode(text) {
+  const lines = text.split('\n');
+  let fence = null; // the opening fence string while inside a block
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const m = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    if (fence) {
+      if (m && m[1][0] === fence[0] && m[1].length >= fence.length && line.trim() === m[1]) fence = null;
+      lines[i] = '';
+      continue;
+    }
+    if (m) { fence = m[1]; lines[i] = ''; continue; }
+    if (line.includes('`')) lines[i] = line.replace(/`[^`\r\n]+`/g, ' ');
+  }
+  return lines.join('\n');
+}
+
+// Splits a note into its frontmatter text and its code-free body.
+function splitNote(content) {
+  const fm = content.match(FRONTMATTER);
+  const body = fm ? content.slice(fm[0].length) : content;
+  return { frontmatter: fm ? fm[1] : '', body: stripCode(body) };
+}
+
 function extractTags(content) {
   const out = [];
   const add = t => {
     const v = String(t).trim().replace(/['"#]/g, '');
-    if (v && !out.includes(v)) out.push(v);
+    if (v && isValidTag(v) && !out.includes(v)) out.push(v);
   };
-  const fm = content.match(FRONTMATTER);
-  if (fm) {
-    const flow = fm[1].match(TAGS_FLOW);
+  const { frontmatter, body } = splitNote(content);
+  if (frontmatter) {
+    const flow = frontmatter.match(TAGS_FLOW);
     if (flow) flow[1].split(',').forEach(add);
-    const block = fm[1].match(TAGS_BLOCK);
+    const block = frontmatter.match(TAGS_BLOCK);
     if (block) {
       for (const line of block[1].split(/\r?\n/)) {
         const m = line.match(/^\s*-\s+(.+)/);
         if (m) add(m[1]);
       }
     }
+    const str = !flow && !block && frontmatter.match(TAGS_STRING);
+    if (str) str[1].split(/[,\s]+/).forEach(add);
   }
-  const body = fm ? content.slice(fm[0].length) : content;
   TAGS_INLINE.lastIndex = 0;
   let m;
   while ((m = TAGS_INLINE.exec(body)) !== null) add(m[1]);
@@ -468,17 +563,48 @@ function extractTag(content) {
   return tags.length ? tags[0] : null;
 }
 
+// Turns a markdown-link destination into a note target, or null when it points
+// at a URL, a same-note heading, or a non-note file.
+function markdownLinkTarget(raw) {
+  let dest = raw.trim();
+  if (dest.startsWith('<')) dest = dest.slice(1, dest.indexOf('>') > 0 ? dest.indexOf('>') : undefined);
+  else {
+    // Drop a "title": cut at the first whitespace followed by a quote. A
+    // single-character search stays linear where /\s+["'].*$/ did not
+    // (CodeQL js/polynomial-redos).
+    const t = dest.search(/\s["']/);
+    if (t >= 0) dest = dest.slice(0, t).trimEnd();
+  }
+  if (!dest || dest.startsWith('#') || URL_SCHEME.test(dest)) return null;
+  try { dest = decodeURIComponent(dest); } catch (_) { /* keep it as written */ }
+  dest = dest.split('#')[0].replace(/^(\.\.?\/)+/, '').trim();
+  if (!dest) return null;
+  const ext = /\.([a-z0-9]{1,8})$/i.exec(dest);
+  if (ext && ext[1].toLowerCase() !== 'md') return null; // attachment
+  return dest.replace(/\.md$/i, '');
+}
+
+// Note link targets in order: [[wikilinks]] and [text](note.md) links from the
+// frontmatter and the body, skipping anything inside code.
 function extractWikilinks(content) {
   const result = [];
-  WIKILINK.lastIndex = 0;
-  let match;
-  while ((match = WIKILINK.exec(content)) !== null) {
-    let target = match[2].trim();
-    if (!target) continue;
-    if (NON_NOTE_EXT.test(target)) continue; // attachment link or embed, not a note
-    if (match[1] === '!' && /\.[a-z0-9]{1,6}$/i.test(target) && !/\.md$/i.test(target)) continue;
-    target = target.replace(/\.md$/i, '');
-    result.push(target);
+  const { frontmatter, body } = splitNote(content);
+  for (const text of frontmatter ? [frontmatter, body] : [body]) {
+    WIKILINK.lastIndex = 0;
+    let match;
+    while ((match = WIKILINK.exec(text)) !== null) {
+      let target = match[2].trim();
+      if (!target) continue;
+      if (NON_NOTE_EXT.test(target)) continue; // attachment link or embed, not a note
+      if (match[1] === '!' && /\.[a-z0-9]{1,6}$/i.test(target) && !/\.md$/i.test(target)) continue;
+      target = target.replace(/\.md$/i, '');
+      result.push(target);
+    }
+    MD_LINK.lastIndex = 0;
+    while ((match = MD_LINK.exec(text)) !== null) {
+      const target = markdownLinkTarget(match[2]);
+      if (target) result.push(target);
+    }
   }
   return result;
 }
@@ -578,9 +704,21 @@ async function collectMarkdownFiles(vaultPath, patterns) {
       if (entry.name.startsWith('.')) continue;
       const fullPath = path.join(dir, entry.name);
       if (isIgnoredPath(fullPath, vaultPath, patterns)) continue;
-      if (entry.isDirectory()) {
+      let isDir = entry.isDirectory();
+      let isFile = entry.isFile();
+      if (entry.isSymbolicLink()) {
+        // Follow symlinks, like the chokidar watcher does (followSymlinks), so a
+        // symlinked note or folder doesn't vanish on the next full rescan.
+        // Broken links are skipped; the realpath guard in walk() stops cycles.
+        try {
+          const target = await fs.promises.stat(fullPath);
+          isDir = target.isDirectory();
+          isFile = target.isFile();
+        } catch (_) { continue; }
+      }
+      if (isDir) {
         await walk(fullPath);
-      } else if (entry.isFile() && entry.name.endsWith('.md')) {
+      } else if (isFile && entry.name.endsWith('.md')) {
         files.push(fullPath);
       }
     }
@@ -611,7 +749,7 @@ function materializeGraph(entries, vaultPath, options = {}) {
   const raw = Array.from(entries.values())
     .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
     .map(entry => ({ basename: entry.basename, filePath: entry.path, entry }));
-  const basenameCounts = {};
+  const basenameCounts = Object.create(null);
   for (const item of raw) {
     basenameCounts[item.basename] = (basenameCounts[item.basename] || 0) + 1;
   }
@@ -621,13 +759,22 @@ function materializeGraph(entries, vaultPath, options = {}) {
       .map(([basename]) => basename)
   );
 
-  const files = {};
-  const tags = {};
-  const allTags = {};
-  const basenameToIds = {};
+  const files = Object.create(null);
+  const tags = Object.create(null);
+  const allTags = Object.create(null);
+  const basenameToIds = Object.create(null);
   // Obsidian resolves links case-insensitively, so index lower-cased names too.
-  const lowerToIds = {};
-  const relPathToId = {};
+  const lowerToIds = Object.create(null);
+  const relPathToId = Object.create(null);
+  const idToRel = Object.create(null);
+  // Obsidian treats tags case-insensitively (#Project and #project are one
+  // tag). The first spelling met in path order becomes the tag's name.
+  const tagSpelling = new Map();
+  const canonicalTag = t => {
+    const key = t.toLowerCase();
+    if (!tagSpelling.has(key)) tagSpelling.set(key, t);
+    return tagSpelling.get(key);
+  };
   for (const { basename, filePath, entry } of raw) {
     const id = noteId(basename, filePath, vaultPath, duplicatedBasenames);
     files[id] = {
@@ -636,27 +783,47 @@ function materializeGraph(entries, vaultPath, options = {}) {
       wikilinks: entry.wikilinks,
       mtimeMs: entry.mtimeMs
     };
-    const entryTags = entry.tags || (entry.tag ? [entry.tag] : []);
+    const entryTags = Array.from(new Set((entry.tags || (entry.tag ? [entry.tag] : [])).map(canonicalTag)));
     if (entryTags.length) { tags[id] = entryTags[0]; allTags[id] = entryTags; }
     if (!basenameToIds[basename]) basenameToIds[basename] = [];
     basenameToIds[basename].push(id);
     const lower = basename.toLowerCase();
     if (!lowerToIds[lower]) lowerToIds[lower] = [];
     lowerToIds[lower].push(id);
-    relPathToId[path.relative(vaultPath, filePath).replace(/\.md$/, '').replace(/\\/g, '/').toLowerCase()] = id;
+    const relNoExt = path.relative(vaultPath, filePath).replace(/\.md$/, '').replace(/\\/g, '/');
+    relPathToId[relNoExt.toLowerCase()] = id;
+    idToRel[id] = relNoExt;
   }
+  const folderOfRel = rel => (rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '');
+  // A bare [[Note]] that matches several notes links to one of them, not all:
+  // a match in the source note's folder first, then the shortest vault-relative
+  // path, then alphabetical. This approximates Obsidian's rule (its exact
+  // tie-breaking is unverified); graphSource 'obsidian'/'auto' with the bridge
+  // plugin uses Obsidian's real answer instead.
+  const pickOne = (ids, sourceId) => {
+    if (!ids || ids.length <= 1) return ids;
+    const srcFolder = folderOfRel(idToRel[sourceId] || '');
+    const sameFolder = ids.filter(id => folderOfRel(idToRel[id]) === srcFolder);
+    const pool = sameFolder.length ? sameFolder : ids;
+    const best = pool.slice().sort((a, b) => {
+      const ra = idToRel[a], rb = idToRel[b];
+      if (ra.length !== rb.length) return ra.length - rb.length;
+      return ra < rb ? -1 : ra > rb ? 1 : 0;
+    })[0];
+    return [best];
+  };
   // Resolve a [[link]] target to note ids: exact basename, then a vault-relative
   // path ([[Folder/Note]]), then the last path segment, then case-insensitively.
-  const resolveTarget = target => {
-    if (basenameToIds[target]) return basenameToIds[target];
+  const resolveTarget = (target, sourceId) => {
+    if (basenameToIds[target]) return pickOne(basenameToIds[target], sourceId);
     if (target.includes('/')) {
       const byPath = relPathToId[target.replace(/^\/+/, '').toLowerCase()];
       if (byPath) return [byPath];
       const last = target.slice(target.lastIndexOf('/') + 1);
-      if (basenameToIds[last]) return basenameToIds[last];
-      if (lowerToIds[last.toLowerCase()]) return lowerToIds[last.toLowerCase()];
+      if (basenameToIds[last]) return pickOne(basenameToIds[last], sourceId);
+      if (lowerToIds[last.toLowerCase()]) return pickOne(lowerToIds[last.toLowerCase()], sourceId);
     }
-    return lowerToIds[target.toLowerCase()] || null;
+    return pickOne(lowerToIds[target.toLowerCase()], sourceId) || null;
   };
 
   if (duplicatedBasenames.size > 0) {
@@ -683,7 +850,7 @@ function materializeGraph(entries, vaultPath, options = {}) {
   const ghostIds = new Set();
   for (const [sourceId, file] of Object.entries(files)) {
     for (const targetBasename of file.wikilinks) {
-      const targetIds = resolveTarget(targetBasename) || (nodeSet.has(targetBasename) ? [targetBasename] : []);
+      const targetIds = resolveTarget(targetBasename, sourceId) || (nodeSet.has(targetBasename) ? [targetBasename] : []);
       if (targetIds.length === 0 && showUnresolved && targetBasename.length > 0) {
         if (!ghostIds.has(targetBasename)) {
           ghostIds.add(targetBasename);
@@ -708,7 +875,7 @@ function materializeGraph(entries, vaultPath, options = {}) {
     }
   }
 
-  const discoveredTags = {};
+  const discoveredTags = Object.create(null);
   for (const list of Object.values(allTags)) {
     for (const tag of list) discoveredTags[tag] = (discoveredTags[tag] || 0) + 1;
   }
@@ -719,6 +886,240 @@ function materializeGraph(entries, vaultPath, options = {}) {
     tagged: Object.keys(tags).length,
     discoveredTags
   };
+}
+
+// ---------------------------------------------------------------------------
+// Obsidian bridge plugin (obsidian-plugin/). The plugin writes Obsidian's own
+// link/tag index to graph.json and the open note to active.json inside its
+// plugin folder. Only the default config dir (.obsidian) is checked: a vault
+// that overrides Obsidian's config folder isn't found.
+// ---------------------------------------------------------------------------
+const PLUGIN_ID = 'live-wallpaper-bridge';
+const OBSIDIAN_CONFIG_DIR = '.obsidian';
+const PLUGIN_SCHEMA = 1;
+const PLUGIN_MAX_BYTES = 64e6;
+const PLUGIN_MAX_NODES = 200000;
+const PLUGIN_MAX_LINKS = 2000000;
+const PLUGIN_MAX_ID = 1000;
+// 'auto' treats the plugin graph as fresh when it was written no earlier than
+// the newest note mtime the scan has seen, minus this slack (mtime resolution,
+// a save racing the plugin's debounce).
+const PLUGIN_FRESH_SLACK_MS = 2000;
+// While the plugin graph is live, a just-saved note is briefly newer than it;
+// the plugin rewrites ~1-2 s later. Keep the plugin graph for this long before
+// falling back to the scan, so every edit doesn't flip sources twice.
+const PLUGIN_GRACE_MS = 5000;
+
+function pluginDir(vaultPath) {
+  return path.join(vaultPath, OBSIDIAN_CONFIG_DIR, 'plugins', PLUGIN_ID);
+}
+
+const isShortString = (v, max) => typeof v === 'string' && v.length > 0 && v.length <= max;
+
+// Validates the plugin's graph.json. Throws on a wrong schema or shape; drops
+// individual malformed nodes and links rather than the whole file.
+function validatePluginGraph(raw) {
+  if (!isPlainObject(raw)) throw new Error('plugin graph must be a JSON object');
+  if (raw.schema !== PLUGIN_SCHEMA) throw new Error(`plugin graph schema must be ${PLUGIN_SCHEMA}`);
+  if (typeof raw.generatedAt !== 'number' || !Number.isFinite(raw.generatedAt) || raw.generatedAt <= 0) {
+    throw new Error('plugin graph generatedAt must be a timestamp');
+  }
+  if (!Array.isArray(raw.nodes) || !Array.isArray(raw.links)) throw new Error('plugin graph needs nodes and links arrays');
+  if (raw.nodes.length > PLUGIN_MAX_NODES) throw new Error(`plugin graph has too many nodes (max ${PLUGIN_MAX_NODES})`);
+  if (raw.links.length > PLUGIN_MAX_LINKS) throw new Error(`plugin graph has too many links (max ${PLUGIN_MAX_LINKS})`);
+  const nodes = [];
+  const ids = new Set();
+  for (const n of raw.nodes) {
+    if (!isPlainObject(n) || !isShortString(n.id, PLUGIN_MAX_ID) || ids.has(n.id)) continue;
+    const node = { id: n.id };
+    if (n.ghost === true) {
+      node.ghost = true;
+    } else {
+      if (!isShortString(n.path, 4096) || !n.path.endsWith('.md')) continue;
+      node.path = n.path;
+      if (isShortString(n.label, PLUGIN_MAX_ID)) node.label = n.label;
+      if (isShortString(n.tag, 500)) node.tag = n.tag;
+      if (Array.isArray(n.tags)) {
+        const tags = n.tags.filter(t => isShortString(t, 500)).slice(0, 200);
+        if (tags.length > 1) node.tags = tags;
+      }
+      if (typeof n.mtime === 'number' && Number.isFinite(n.mtime) && n.mtime > 0) node.mtime = n.mtime;
+      if (isShortString(n.folder, 1000)) node.folder = n.folder;
+    }
+    ids.add(n.id);
+    nodes.push(node);
+  }
+  const links = [];
+  for (const l of raw.links) {
+    if (!isPlainObject(l) || typeof l.source !== 'string' || typeof l.target !== 'string') continue;
+    if (l.source === l.target || !ids.has(l.source) || !ids.has(l.target)) continue;
+    links.push({ source: l.source, target: l.target });
+  }
+  return { generatedAt: raw.generatedAt, nodes, links };
+}
+
+// Turns a validated plugin graph into the same result shape as
+// materializeGraph: ignorePaths and showUnresolvedLinks applied, `path`
+// stripped (it is only there for ignorePaths).
+function materializePluginGraph(plugin, vaultPath, options = {}) {
+  const showUnresolved = options.showUnresolvedLinks !== undefined ? options.showUnresolvedLinks : DEFAULTS.showUnresolvedLinks;
+  const patterns = options.ignorePaths || [];
+  const kept = [];
+  const keptIds = new Set();
+  for (const n of plugin.nodes) {
+    if (n.ghost) continue;
+    if (patterns.length && isIgnoredPath(path.join(vaultPath, n.path), vaultPath, patterns)) continue;
+    const { path: _path, ...node } = n;
+    kept.push(node);
+    keptIds.add(node.id);
+  }
+  const ghostIds = new Set();
+  if (showUnresolved) for (const n of plugin.nodes) if (n.ghost) ghostIds.add(n.id);
+  const links = [];
+  const linkedGhosts = new Set();
+  for (const l of plugin.links) {
+    if (!keptIds.has(l.source)) continue; // ghosts never link out
+    if (keptIds.has(l.target)) links.push(l);
+    else if (ghostIds.has(l.target)) { links.push(l); linkedGhosts.add(l.target); }
+  }
+  // A ghost only linked from ignored notes disappears with them.
+  const nodes = kept.concat(plugin.nodes.filter(n => n.ghost && linkedGhosts.has(n.id)).map(n => ({ id: n.id, ghost: true })));
+  const discoveredTags = Object.create(null);
+  let tagged = 0;
+  for (const n of kept) {
+    const list = n.tags || (n.tag ? [n.tag] : []);
+    if (list.length) tagged++;
+    for (const t of list) discoveredTags[t] = (discoveredTags[t] || 0) + 1;
+  }
+  return { nodes, links, tagged, discoveredTags };
+}
+
+// Validates active.json: { path, id, at } with path/id strings or null.
+function validatePluginActive(raw) {
+  if (!isPlainObject(raw)) throw new Error('active note must be a JSON object');
+  const p = raw.path === null || raw.path === undefined ? null : raw.path;
+  const id = raw.id === null || raw.id === undefined ? null : raw.id;
+  if (p !== null && !isShortString(p, 4096)) throw new Error('active note path must be a string or null');
+  if (id !== null && !isShortString(id, PLUGIN_MAX_ID)) throw new Error('active note id must be a string or null');
+  const at = typeof raw.at === 'number' && Number.isFinite(raw.at) ? raw.at : 0;
+  return { path: p, id, at };
+}
+
+async function readPluginJson(filePath) {
+  const stat = await fs.promises.stat(filePath);
+  if (stat.size > PLUGIN_MAX_BYTES) throw new Error(`larger than ${PLUGIN_MAX_BYTES} bytes`);
+  return JSON.parse(await fs.promises.readFile(filePath, 'utf8'));
+}
+
+// (Re)reads the plugin's graph.json into state.pluginGraph. A missing file
+// clears it; an unreadable or invalid one (e.g. caught mid-write) keeps the
+// last good graph. Returns true when state.pluginGraph changed.
+async function loadPluginGraphFile(state) {
+  const file = path.join(pluginDir(state.cfg.vaultPath), 'graph.json');
+  // Reads can overlap (watcher events arrive faster than a big file parses);
+  // only the newest read may set the result.
+  const seq = state.pluginGraphSeq = (state.pluginGraphSeq || 0) + 1;
+  try {
+    const next = validatePluginGraph(await readPluginJson(file));
+    if (seq !== state.pluginGraphSeq) return false;
+    state.pluginGraph = next;
+    return true;
+  } catch (e) {
+    if (seq !== state.pluginGraphSeq) return false;
+    if (e.code === 'ENOENT') {
+      const had = !!state.pluginGraph;
+      state.pluginGraph = null;
+      return had;
+    }
+    console.warn(`obsidian plugin graph ignored: ${e.message}`);
+    return false;
+  }
+}
+
+// Same for active.json -> state.pluginActiveRaw. Returns true when it changed.
+async function loadPluginActiveFile(state) {
+  const file = path.join(pluginDir(state.cfg.vaultPath), 'active.json');
+  const seq = state.pluginActiveSeq = (state.pluginActiveSeq || 0) + 1;
+  try {
+    const next = validatePluginActive(await readPluginJson(file));
+    if (seq !== state.pluginActiveSeq) return false;
+    state.pluginActiveRaw = next;
+    return true;
+  } catch (e) {
+    if (seq !== state.pluginActiveSeq) return false;
+    if (e.code === 'ENOENT') {
+      const had = !!state.pluginActiveRaw;
+      state.pluginActiveRaw = null;
+      return had;
+    }
+    console.warn(`obsidian active note ignored: ${e.message}`);
+    return false;
+  }
+}
+
+// The active note as served: id dropped when its path is under ignorePaths.
+// Broadcasts an SSE 'active' event when it differs from what was last served.
+function refreshActiveNote(state) {
+  const raw = state.pluginActiveRaw;
+  let next = { id: null, path: null, at: 0 };
+  if (raw) {
+    next = { id: raw.id, path: raw.path, at: raw.at };
+    const patterns = state.cfg.ignorePaths || [];
+    if (raw.path && patterns.length && isIgnoredPath(path.join(state.cfg.vaultPath, raw.path), state.cfg.vaultPath, patterns)) next.id = null;
+  }
+  const prev = state.activeNote || { id: null, path: null, at: 0 };
+  state.activeNote = next;
+  if (prev.id !== next.id || prev.path !== next.path) {
+    broadcastEvent(state, 'active', next);
+    return true;
+  }
+  return false;
+}
+
+function newestEntryMtime(entries) {
+  let newest = 0;
+  if (entries) for (const e of entries.values()) if (e.mtimeMs > newest) newest = e.mtimeMs;
+  return newest;
+}
+
+// True when the plugin graph's real (non-ghost) notes are exactly the notes
+// the scan found, after ignorePaths. Paths are vault-relative with '/'.
+function pluginNotesMatchScan(state) {
+  const plugin = state.pluginGraph;
+  const vault = state.cfg.vaultPath;
+  const patterns = state.cfg.ignorePaths || [];
+  const onDisk = new Set();
+  if (state.entries) for (const p of state.entries.keys()) onDisk.add(path.relative(vault, p).split(path.sep).join('/'));
+  let listed = 0;
+  for (const n of plugin.nodes) {
+    if (n.ghost || !n.path) continue;
+    if (patterns.length && isIgnoredPath(path.join(vault, n.path), vault, patterns)) continue;
+    if (!onDisk.has(n.path)) return false;
+    listed++;
+  }
+  return listed === onDisk.size;
+}
+
+// Which graph to serve: 'scan' never uses the plugin, 'obsidian' uses it
+// whenever a valid one exists, 'auto' only while it is fresh (see
+// PLUGIN_FRESH_SLACK_MS / PLUGIN_GRACE_MS). Edits made while Obsidian was
+// closed make the scan newer, so it wins until the plugin writes again.
+function chooseGraphSource(state, now = Date.now()) {
+  const mode = state.cfg.graphSource || DEFAULTS.graphSource;
+  const plugin = state.pluginGraph;
+  if (mode === 'scan' || !plugin) return { source: 'scan' };
+  if (mode === 'obsidian') return { source: 'obsidian' };
+  const newest = newestEntryMtime(state.entries);
+  // Fresh = no note on disk is newer than the plugin's last write AND the
+  // plugin lists exactly the notes on disk. The second check catches notes
+  // added, deleted or renamed while Obsidian was closed (a deletion leaves
+  // no newer mtime behind).
+  if (plugin.generatedAt >= newest - PLUGIN_FRESH_SLACK_MS && pluginNotesMatchScan(state)) return { source: 'obsidian' };
+  const age = now - newest;
+  if (state.liveGraphSource === 'obsidian' && age >= 0 && age < PLUGIN_GRACE_MS) {
+    return { source: 'obsidian', recheckInMs: PLUGIN_GRACE_MS - age + 50 };
+  }
+  return { source: 'scan' };
 }
 
 function serializeGraph(result) {
@@ -768,6 +1169,17 @@ function serveJson(res, value) {
   res.end(JSON.stringify(value));
 }
 
+// The settings page has controls that change config, so another site must not
+// be able to frame it (clickjacking). frame-ancestors 'self' still allows the
+// settings page's own same-origin preview iframe. index.html (the wallpaper
+// itself) stays frameable: it has no controls, and some wallpaper/widget hosts
+// embed it in an iframe from their own origin.
+const FRAME_PROTECTED_FILES = new Set(['settings.html']);
+const FRAME_PROTECTION_HEADERS = {
+  'Content-Security-Policy': "frame-ancestors 'self'",
+  'X-Frame-Options': 'SAMEORIGIN'
+};
+
 function serveFile(res, filePath, cacheControl = STATIC_CACHE_CONTROL) {
   const ext = path.extname(filePath);
   const mime = {
@@ -781,7 +1193,9 @@ function serveFile(res, filePath, cacheControl = STATIC_CACHE_CONTROL) {
   }[ext] || 'application/octet-stream';
   try {
     const stat = fs.statSync(filePath);
-    res.writeHead(200, { ...defaultHeaders(mime, cacheControl), 'Content-Length': String(stat.size) });
+    const headers = { ...defaultHeaders(mime, cacheControl), 'Content-Length': String(stat.size) };
+    if (FRAME_PROTECTED_FILES.has(path.basename(filePath))) Object.assign(headers, FRAME_PROTECTION_HEADERS);
+    res.writeHead(200, headers);
     const stream = fs.createReadStream(filePath, { highWaterMark: 64 * 1024 });
     stream.pipe(res);
     stream.on('error', () => {
@@ -804,34 +1218,75 @@ function serveFile(res, filePath, cacheControl = STATIC_CACHE_CONTROL) {
 // extra layer of defense against that on top of the loopback bind.
 const TRUSTED_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
 
-function isTrustedHost(hostHeader) {
-  if (typeof hostHeader !== 'string') return false;
-  const hostname = hostHeader.split(':')[0].toLowerCase();
-  return TRUSTED_HOSTS.has(hostname);
+// Host header -> hostname, or null when malformed. Handles bracketed IPv6
+// ("[::1]:3000" -> "[::1]"); a bare IPv6 address is not a valid Host value.
+function hostnameFromHostHeader(hostHeader) {
+  const h = hostHeader.trim().toLowerCase();
+  if (!h) return null;
+  if (h.startsWith('[')) {
+    const end = h.indexOf(']');
+    if (end < 0) return null;
+    const rest = h.slice(end + 1);
+    if (rest && !/^:\d{1,5}$/.test(rest)) return null;
+    return h.slice(0, end + 1);
+  }
+  const parts = h.split(':');
+  if (parts.length > 2) return null;
+  if (parts.length === 2 && !/^\d{1,5}$/.test(parts[1])) return null;
+  return parts[0] || null;
 }
 
-function readBody(req, res) {
+function isTrustedHost(hostHeader) {
+  if (typeof hostHeader !== 'string') return false;
+  const hostname = hostnameFromHostHeader(hostHeader);
+  return hostname !== null && TRUSTED_HOSTS.has(hostname);
+}
+
+// Media type match that ignores parameters: "application/json; charset=utf-8" is JSON.
+function isJsonContentType(header) {
+  return typeof header === 'string' && header.split(';')[0].trim().toLowerCase() === 'application/json';
+}
+
+// After a 413, the rest of an oversized body is read and discarded (up to this
+// much) instead of resetting the socket mid-upload, so the client actually
+// receives the 413. Past the cap the connection is dropped once the response
+// has been flushed.
+const MAX_DISCARD_BYTES = 16e6;
+
+function readBody(req, res, maxBytes = MAX_BODY_BYTES) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let bytes = 0;
     let tooLarge = false;
+    let discarded = 0;
     req.on('data', chunk => {
-      if (tooLarge) return;
+      if (tooLarge) {
+        discarded += chunk.length;
+        if (discarded > MAX_DISCARD_BYTES && !req.destroyed) {
+          if (res.writableFinished) req.destroy();
+          else if (typeof res.once === 'function') res.once('finish', () => req.destroy());
+          if (typeof req.pause === 'function') req.pause();
+        }
+        return;
+      }
       // chunk is a Buffer; .length is bytes. Accumulating into a '' string
       // instead and checking .length there would count UTF-16 code units, not
       // bytes — undercounting the real size of multibyte (e.g. UTF-8) input.
       bytes += chunk.length;
-      if (bytes > MAX_BODY_BYTES) {
+      if (bytes > maxBytes) {
         tooLarge = true;
+        chunks.length = 0;
+        // Stop buffering and answer now; the rest of the body is drained above.
+        // (No "Connection: close": that makes Node close the socket while the
+        // client is still uploading, which it sees as EPIPE instead of a 413.)
         res.writeHead(413, defaultHeaders('application/json', DYNAMIC_CACHE_CONTROL));
         res.end(JSON.stringify({ error: 'request body too large' }));
-        req.destroy();
         reject(new Error('request body too large'));
         return;
       }
       chunks.push(chunk);
     });
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    req.on('end', () => { if (!tooLarge) resolve(Buffer.concat(chunks).toString('utf8')); });
     req.on('error', reject);
   });
 }
@@ -852,9 +1307,32 @@ function broadcastEvent(state, event, payload) {
 // cold-start fallback and a debugging aid. It is written on the first build and
 // on shutdown, not on every edit (that used to cost a full disk write per save).
 async function rebuildGraphState(state, options = {}) {
-  const result = materializeGraph(state.entries, state.cfg.vaultPath, {
-    showUnresolvedLinks: state.cfg.showUnresolvedLinks
-  });
+  const choice = chooseGraphSource(state);
+  const result = choice.source === 'obsidian'
+    ? materializePluginGraph(state.pluginGraph, state.cfg.vaultPath, {
+      showUnresolvedLinks: state.cfg.showUnresolvedLinks,
+      ignorePaths: state.cfg.ignorePaths
+    })
+    : materializeGraph(state.entries, state.cfg.vaultPath, {
+      showUnresolvedLinks: state.cfg.showUnresolvedLinks
+    });
+  if (state.liveGraphSource && state.liveGraphSource !== choice.source) {
+    console.log(`graph source: ${choice.source === 'obsidian' ? 'Obsidian plugin' : 'vault scan'}`);
+  }
+  state.liveGraphSource = choice.source;
+  if (state.graphRecheckTimer) { clearTimeout(state.graphRecheckTimer); state.graphRecheckTimer = null; }
+  if (choice.recheckInMs) {
+    // The plugin graph is in its grace period: look again once it ends, in
+    // case the plugin never catches up (Obsidian closed right after a save).
+    state.graphRecheckTimer = setTimeout(() => {
+      state.graphRecheckTimer = null;
+      rebuildGraphState(state)
+        .then(() => broadcastEvent(state, 'graph', { version: state.graphVersion }))
+        .catch(e => console.error(`build failed: ${e.message}`));
+    }, choice.recheckInMs);
+    if (state.graphRecheckTimer.unref) state.graphRecheckTimer.unref();
+  }
+  refreshActiveNote(state);
   state.discoveredTags = result.discoveredTags;
   state.graphJson = serializeGraph(result);
   // Content hash, not the version counter: versions restart at 1 when the
@@ -876,7 +1354,19 @@ async function applyFsEventToState(state, event, filePath) {
   if (typeof filePath !== 'string') return false;
   if (isOutsideVault(filePath, state.cfg.vaultPath)) return false;
 
+  // Watcher events are handled concurrently, so an older add/change parse can
+  // finish after a newer event for the same path (or after an unlink) and
+  // would otherwise resurrect a deleted note or overwrite newer content. Each
+  // add/change takes a token; any later event for the path replaces or clears
+  // it, and a parse whose token is no longer current is discarded. The map only
+  // holds paths with a parse in flight.
+  if (!state.fsPending) state.fsPending = new Map();
+  const pending = state.fsPending;
+
   if (event === 'unlinkDir') {
+    for (const p of Array.from(pending.keys())) {
+      if (p === filePath || p.startsWith(filePath + path.sep)) pending.delete(p);
+    }
     let removed = false;
     for (const existingPath of state.entries.keys()) {
       if (existingPath === filePath || existingPath.startsWith(filePath + path.sep)) {
@@ -893,6 +1383,7 @@ async function applyFsEventToState(state, event, filePath) {
   }
 
   if (event === 'unlink') {
+    pending.delete(filePath);
     return state.entries.delete(filePath);
   }
 
@@ -900,15 +1391,24 @@ async function applyFsEventToState(state, event, filePath) {
     return false;
   }
 
+  state.fsSeq = (state.fsSeq || 0) + 1;
+  const token = state.fsSeq;
+  pending.set(filePath, token);
+  const isCurrent = () => state.fsPending === pending && pending.get(filePath) === token;
+  const finish = () => { if (pending.get(filePath) === token) pending.delete(filePath); };
+
   let stat;
   try {
     stat = await fs.promises.stat(filePath);
   } catch (_) {
+    finish();
     return false;
   }
-  if (!stat.isFile()) return false;
+  if (!stat.isFile()) { finish(); return false; }
 
   const nextEntry = await parseMarkdownEntry(filePath);
+  if (!isCurrent()) return false; // superseded by a newer event: drop this result
+  finish();
   if (!nextEntry) return false;
   const prev = state.entries.get(filePath);
   state.entries.set(filePath, nextEntry);
@@ -943,11 +1443,23 @@ async function readHead(filePath, limit) {
 
 async function pickNoteOfHour(state, hourParam) {
   const ids = state.realNoteIds || [];
-  const entries = state.entries ? Array.from(state.entries.values()) : [];
-  if (!entries.length) return { title: '', excerpt: '', folder: '', mtime: 0 };
+  const size = state.entries ? state.entries.size : 0;
+  if (!size) return { title: '', excerpt: '', folder: '', mtime: 0 };
   const hourKey = /^\d{1,10}$/.test(hourParam || '') ? hourParam : String(Math.floor(Date.now() / 3600000));
-  // Sort by path so the pick is stable regardless of Map insertion order.
-  const sorted = entries.slice().sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  // Sort by path so the pick is stable regardless of Map insertion order. The
+  // sorted list is cached per graph version (and entries map / size, which
+  // change before the debounced rebuild bumps the version), not rebuilt on
+  // every request.
+  const cache = state.noteOfHourCache;
+  if (!cache || cache.version !== state.graphVersion || cache.entries !== state.entries || cache.size !== size) {
+    state.noteOfHourCache = {
+      version: state.graphVersion,
+      entries: state.entries,
+      size,
+      sorted: Array.from(state.entries.values()).sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+    };
+  }
+  const sorted = state.noteOfHourCache.sorted;
   // Prefer notes with some body text; try a few candidates before giving up.
   for (let attempt = 0; attempt < 8; attempt++) {
     const entry = sorted[hashString(hourKey + ':' + attempt) % sorted.length];
@@ -962,10 +1474,78 @@ async function pickNoteOfHour(state, hourParam) {
       excerpt,
       folder: sep > 0 ? rel.slice(0, sep).replace(/\\/g, '/') : '',
       mtime: entry.mtimeMs || 0,
-      noteCount: ids.length || entries.length
+      noteCount: ids.length || size
     };
   }
   return { title: '', excerpt: '', folder: '', mtime: 0 };
+}
+
+// Settled node positions, saved by the renderer when the layout comes to rest
+// and served back on the next page load, so a reload (host restart, wake from
+// sleep, display change) starts from the last layout instead of recomputing
+// it. Stored as layout.json next to the config; one layout per vault.
+const MAX_LAYOUT_BYTES = 32e6; // ~35k notes is ~1-2 MB; generous headroom
+const LAYOUT_SAVE_DEBOUNCE_MS = 2000;
+function layoutPath(state) {
+  return path.join(path.dirname(state.configPath || cfgPath), 'layout.json');
+}
+function readLayoutFile(state) {
+  try {
+    const data = JSON.parse(fs.readFileSync(layoutPath(state), 'utf8'));
+    return sanitizeLayout(data);
+  } catch (_) {
+    return null;
+  }
+}
+// Accepts { layout, clusterByTag, width, height, positions: { id: [x, y] } }
+// and drops anything malformed rather than failing the whole save.
+function sanitizeLayout(raw) {
+  if (!isPlainObject(raw) || !isPlainObject(raw.positions)) throw new Error('layout must have a positions object');
+  if (typeof raw.layout !== 'string' || !LAYOUTS.has(raw.layout)) throw new Error('layout.layout must be a known layout');
+  const width = Number(raw.width), height = Number(raw.height);
+  if (!(width > 0 && width < 1e5 && height > 0 && height < 1e5)) throw new Error('layout width/height out of range');
+  const positions = Object.create(null);
+  let count = 0;
+  for (const [id, p] of Object.entries(raw.positions)) {
+    if (!Array.isArray(p) || p.length !== 2) continue;
+    const x = Number(p[0]), y = Number(p[1]);
+    if (!Number.isFinite(x) || !Number.isFinite(y) || Math.abs(x) > 1e7 || Math.abs(y) > 1e7) continue;
+    positions[id] = [Math.round(x * 10) / 10, Math.round(y * 10) / 10];
+    count++;
+  }
+  return { layout: raw.layout, clusterByTag: !!raw.clusterByTag, width, height, count, savedAt: Date.now(), positions };
+}
+async function handleLayout(state, req, res) {
+  const json = (code, body) => {
+    res.writeHead(code, defaultHeaders('application/json; charset=utf-8', DYNAMIC_CACHE_CONTROL));
+    res.end(JSON.stringify(body));
+  };
+  if (!isTrustedHost(req.headers.host)) return json(403, { error: 'untrusted Host header' });
+  if (req.method === 'GET') {
+    if (state.layout === undefined) state.layout = readLayoutFile(state);
+    return json(200, state.layout || {});
+  }
+  if (req.method === 'DELETE') {
+    state.layout = null;
+    try { fs.unlinkSync(layoutPath(state)); } catch (_) {}
+    return json(200, {});
+  }
+  if (req.method !== 'POST') return json(405, { error: 'method not allowed' });
+  if (!isJsonContentType(req.headers['content-type'])) return json(415, { error: 'Content-Type must be application/json' });
+  try {
+    state.layout = sanitizeLayout(JSON.parse(await readBody(req, res, MAX_LAYOUT_BYTES)));
+    // Several screens (span mode) settle at the same moment; write once.
+    if (state.layoutSaveTimer) clearTimeout(state.layoutSaveTimer);
+    state.layoutSaveTimer = setTimeout(() => {
+      state.layoutSaveTimer = null;
+      try { writeConfigFile(state.layout, layoutPath(state)); }
+      catch (e) { console.error(`layout save failed: ${e.message}`); }
+    }, LAYOUT_SAVE_DEBOUNCE_MS);
+    if (state.layoutSaveTimer.unref) state.layoutSaveTimer.unref();
+    return json(200, { ok: true, count: state.layout.count });
+  } catch (e) {
+    if (!res.writableEnded) json(400, { error: e.message });
+  }
 }
 
 // Custom presets live in a sidecar file next to the config, not in browser
@@ -973,10 +1553,52 @@ async function pickNoteOfHour(state, hourParam) {
 function customPresetsPath(state) {
   return path.join(path.dirname(state.configPath || cfgPath), 'custom-presets.json');
 }
+const MAX_CUSTOM_PRESETS = 100;
+// Keys a preset never carries: they describe this vault, not a look.
+const PRESET_EXCLUDED_KEYS = new Set(['tagColors', 'ignorePaths', 'focusNote']);
+
+// Validates one preset's config key by key: a key the server no longer knows
+// (or a value that no longer validates) is dropped rather than losing the
+// whole preset after an upgrade.
+function sanitizePresetConfig(raw) {
+  const out = {};
+  if (!isPlainObject(raw)) return out;
+  for (const [key, value] of Object.entries(raw)) {
+    if (PRESET_EXCLUDED_KEYS.has(key) || !Object.hasOwn(VALIDATORS, key)) continue;
+    const v = VALIDATORS[key];
+    try { out[key] = v.fn(value, key, ...(v.args || [])); } catch (_) { /* drop the bad key */ }
+  }
+  return out;
+}
+
+// custom-presets.json is hand-editable, so every entry is re-validated on
+// read; malformed entries are dropped and the list is capped.
+function sanitizeCustomPresets(list) {
+  if (!Array.isArray(list)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const p of list) {
+    if (out.length >= MAX_CUSTOM_PRESETS) break;
+    if (!isPlainObject(p) || typeof p.name !== 'string') continue;
+    const name = p.name.trim();
+    if (!name || name.length > 60 || seen.has(name)) continue;
+    seen.add(name);
+    const config = sanitizePresetConfig(p.config);
+    out.push({
+      name,
+      description: 'Custom preset',
+      accent: config.accent || (typeof p.accent === 'string' && HEX_COLOR.test(p.accent) ? p.accent : DEFAULTS.accent),
+      background: config.background || (typeof p.background === 'string' && HEX_COLOR.test(p.background) ? p.background : DEFAULTS.background),
+      custom: true,
+      config
+    });
+  }
+  return out;
+}
+
 function readCustomPresets(state) {
   try {
-    const list = JSON.parse(fs.readFileSync(customPresetsPath(state), 'utf8'));
-    return Array.isArray(list) ? list : [];
+    return sanitizeCustomPresets(JSON.parse(fs.readFileSync(customPresetsPath(state), 'utf8')));
   } catch (_) {
     return [];
   }
@@ -990,12 +1612,17 @@ async function handleCustomPresets(state, req, res, requestUrl) {
   if (req.method === 'GET') return json(200, readCustomPresets(state));
   try {
     if (req.method === 'POST') {
-      if (req.headers['content-type'] !== 'application/json') return json(415, { error: 'Content-Type must be application/json' });
+      if (!isJsonContentType(req.headers['content-type'])) return json(415, { error: 'Content-Type must be application/json' });
       const body = JSON.parse(await readBody(req, res));
       const name = validateString(body && body.name, 'name', 60);
       if (!name) throw new Error('name is required');
-      const config = sanitizeConfigPatch(body.config || {});
+      // Strict on write (an invalid value is a 400), then vault-specific keys
+      // are dropped.
+      const config = sanitizePresetConfig(sanitizeConfigPatch(body.config || {}));
       const list = readCustomPresets(state).filter(p => p.name !== name);
+      if (list.length >= MAX_CUSTOM_PRESETS) {
+        throw new Error(`too many custom presets (max ${MAX_CUSTOM_PRESETS}); delete one first`);
+      }
       list.push({ name, description: 'Custom preset', accent: config.accent || state.cfg.accent, background: config.background || state.cfg.background, custom: true, config });
       writeConfigFile(list, customPresetsPath(state));
       return json(200, list);
@@ -1025,6 +1652,17 @@ function createRequestHandler(state) {
       return;
     }
 
+    // DNS-rebinding guard for every route: a browser always sends Host, so a
+    // present-but-foreign Host means a page on another origin reached us via a
+    // rebound name. Reads (graph.json, tags, config) leak note names, so they
+    // get the same check as writes. Routes that return note text or change
+    // state additionally require Host to be present (checked per route).
+    if (req.headers.host !== undefined && !isTrustedHost(req.headers.host)) {
+      res.writeHead(403, defaultHeaders('application/json', DYNAMIC_CACHE_CONTROL));
+      res.end(JSON.stringify({ error: 'untrusted Host header' }));
+      return;
+    }
+
     const requestUrl = new URL(req.url, 'http://127.0.0.1');
     const url = requestUrl.pathname;
 
@@ -1044,9 +1682,22 @@ function createRequestHandler(state) {
 
     if (url === '/api/state' && req.method === 'GET') {
       serveJson(res, {
+        app: APP_ID,
         graphVersion: state.graphVersion,
-        configVersion: state.configVersion
+        configVersion: state.configVersion,
+        // Which graph is live: 'obsidian' (the bridge plugin) or 'scan'.
+        graphSource: state.liveGraphSource || 'scan',
+        plugin: state.pluginGraph
+          ? { found: true, generatedAt: state.pluginGraph.generatedAt }
+          : { found: false }
       });
+      return;
+    }
+
+    // The note open in Obsidian, from the bridge plugin's active.json.
+    // { id, path, at }; id is null when nothing (or a non-note) is open.
+    if (url === '/api/active' && req.method === 'GET') {
+      serveJson(res, state.activeNote || { id: null, path: null, at: 0 });
       return;
     }
 
@@ -1082,6 +1733,11 @@ function createRequestHandler(state) {
       return;
     }
 
+    if (url === '/api/layout') {
+      await handleLayout(state, req, res);
+      return;
+    }
+
     if (url === '/api/custom-presets') {
       await handleCustomPresets(state, req, res, requestUrl);
       return;
@@ -1093,7 +1749,7 @@ function createRequestHandler(state) {
         res.end(JSON.stringify({ error: 'untrusted Host header' }));
         return;
       }
-      if (req.headers['content-type'] !== 'application/json') {
+      if (!isJsonContentType(req.headers['content-type'])) {
         res.writeHead(415, defaultHeaders('application/json', DYNAMIC_CACHE_CONTROL));
         res.end(JSON.stringify({ error: 'Content-Type must be application/json' }));
         return;
@@ -1101,16 +1757,29 @@ function createRequestHandler(state) {
       try {
         const body = JSON.parse(await readBody(req, res));
         const patch = sanitizeConfigPatch(body);
-        const updated = { ...state.cfg, ...patch, vaultPath: state.cfg.vaultPath, port: state.cfg.port };
+        // Merge onto the file on disk, not just state.cfg: a hand edit of
+        // config.json may not have been picked up yet (the reload is
+        // debounced), and writing state.cfg back would silently undo it. An
+        // invalid or unreadable file falls back to the in-memory config.
+        let base = state.cfg;
+        if (state.configPath) {
+          try { base = sanitizePersistedConfig(JSON.parse(fs.readFileSync(state.configPath, 'utf8'))); }
+          catch (_) { base = state.cfg; }
+        }
+        const prev = state.cfg;
+        const updated = { ...base, ...patch, vaultPath: prev.vaultPath, port: prev.port };
         writeConfigFile(updated, state.configPath);
         state.cfg = updated;
         state.safeConfig = buildSafeConfig(updated);
         state.configVersion += 1;
         serveJson(res, state.safeConfig);
         broadcastEvent(state, 'config', { version: state.configVersion });
-        if (Object.prototype.hasOwnProperty.call(patch, 'ignorePaths') && state.onIgnorePathsChanged) {
+        // Compare against the previous in-memory config (not the patch): a
+        // pending hand edit picked up above can change these too.
+        const ignoreChanged = JSON.stringify(updated.ignorePaths) !== JSON.stringify(prev.ignorePaths);
+        if (ignoreChanged && state.onIgnorePathsChanged) {
           await state.onIgnorePathsChanged();
-        } else if (Object.prototype.hasOwnProperty.call(patch, 'showUnresolvedLinks')) {
+        } else if (updated.showUnresolvedLinks !== prev.showUnresolvedLinks || updated.graphSource !== prev.graphSource) {
           await rebuildGraphState(state);
           broadcastEvent(state, 'graph', { version: state.graphVersion });
         }
@@ -1221,8 +1890,12 @@ async function startApp(options = {}) {
     graphJson: '',
     graphVersion: 0,
     configVersion: 1,
-    eventClients: new Set()
+    eventClients: new Set(),
+    pluginGraph: null,
+    pluginActiveRaw: null
   };
+  await loadPluginGraphFile(state);
+  await loadPluginActiveFile(state);
 
   const server = http.createServer(createRequestHandler(state));
 
@@ -1262,7 +1935,8 @@ async function startApp(options = {}) {
     const merged = { ...next, vaultPath: state.cfg.vaultPath, port: state.cfg.port };
     const nextSafe = buildSafeConfig(merged);
     if (JSON.stringify(nextSafe) === JSON.stringify(state.safeConfig)) return; // echo of our own write / no change
-    const unresolvedChanged = merged.showUnresolvedLinks !== state.cfg.showUnresolvedLinks;
+    const unresolvedChanged = merged.showUnresolvedLinks !== state.cfg.showUnresolvedLinks
+      || merged.graphSource !== state.cfg.graphSource;
     const ignoreChanged = JSON.stringify(merged.ignorePaths) !== JSON.stringify(state.cfg.ignorePaths);
     state.cfg = merged;
     state.safeConfig = nextSafe;
@@ -1299,8 +1973,16 @@ async function startApp(options = {}) {
     // Skip dotfiles/dot-directories, and any *file* whose extension is not .md.
     // The extension check must not fire on directories (e.g. "notes.v2"), or
     // chokidar silently never descends into them while the scan still does.
+    const vaultRootAbs = path.resolve(state.cfg.vaultPath);
     const chokidarIgnores = [
-      /(^|[/\\])\./,
+      // Hidden segments *inside* the vault only. chokidar passes absolute
+      // paths, so a plain /(^|[/\\])\./ test would ignore the whole vault
+      // whenever it lives under a dot-folder (~/.vaults, ~/.local/...).
+      filePath => {
+        const rel = path.relative(vaultRootAbs, path.resolve(filePath));
+        if (!rel || rel === '..' || rel.startsWith('..' + path.sep)) return false;
+        return rel.split(path.sep).some(part => part.startsWith('.'));
+      },
       (filePath, stats) => {
         // chokidar calls this once without stats and again with them; only
         // decide when we know it is a file (applyFsEventToState filters .md anyway).
@@ -1321,6 +2003,8 @@ async function startApp(options = {}) {
     }
     const w = chokidar.watch(state.cfg.vaultPath, {
       ignoreInitial: true,
+      // Must match collectMarkdownFiles, which also follows symlinks.
+      followSymlinks: true,
       ignored: chokidarIgnores,
       awaitWriteFinish: { stabilityThreshold: AWAIT_WRITE_FINISH_MS }
     });
@@ -1334,12 +2018,70 @@ async function startApp(options = {}) {
     return w;
   }
   let watcher = createVaultWatcher();
-  state.onIgnorePathsChanged = async () => {
+
+  // The bridge plugin's files live under .obsidian, which the vault watcher
+  // skips (dot-folder), so they get their own watcher. It watches the vault
+  // root but ignores everything except the path down to the two files, so
+  // the plugin folder (or .obsidian itself) may appear later.
+  const pluginRoot = pluginDir(state.cfg.vaultPath);
+  const pluginGraphFile = path.join(pluginRoot, 'graph.json');
+  const pluginActiveFile = path.join(pluginRoot, 'active.json');
+  const pluginWatchSet = new Set([
+    path.resolve(state.cfg.vaultPath),
+    path.resolve(state.cfg.vaultPath, OBSIDIAN_CONFIG_DIR),
+    path.resolve(state.cfg.vaultPath, OBSIDIAN_CONFIG_DIR, 'plugins'),
+    path.resolve(pluginRoot),
+    path.resolve(pluginGraphFile),
+    path.resolve(pluginActiveFile)
+  ]);
+  const pluginWatcher = chokidar.watch(state.cfg.vaultPath, {
+    ignoreInitial: true,
+    depth: 4,
+    ignored: filePath => !pluginWatchSet.has(path.resolve(filePath)),
+    // adapter.write isn't atomic; wait for the write to settle. A read that
+    // still catches a partial file fails validation and keeps the last graph.
+    awaitWriteFinish: { stabilityThreshold: 150 }
+  });
+  const pluginWatcherReady = new Promise(resolve => pluginWatcher.once('ready', resolve));
+  pluginWatcher.on('all', (event, filePath) => {
+    const abs = path.resolve(filePath);
+    if (abs === path.resolve(pluginGraphFile)) {
+      loadPluginGraphFile(state).then(changed => {
+        // In scan mode the plugin graph is never used; don't rebuild for it.
+        if (changed && !(state.cfg.graphSource === 'scan' && state.liveGraphSource === 'scan')) debouncedRebuild();
+      }).catch(e => console.error(`plugin graph update failed: ${e.message}`));
+    } else if (abs === path.resolve(pluginActiveFile)) {
+      loadPluginActiveFile(state).then(changed => { if (changed) refreshActiveNote(state); })
+        .catch(e => console.error(`active note update failed: ${e.message}`));
+    } else if (event === 'unlinkDir' && (abs === path.resolve(pluginRoot) || pluginRoot.startsWith(abs + path.sep))) {
+      // Plugin folder removed (plugin uninstalled): drop both.
+      const had = !!state.pluginGraph;
+      state.pluginGraph = null;
+      state.pluginActiveRaw = null;
+      refreshActiveNote(state);
+      if (had) debouncedRebuild();
+    }
+  }).on('error', e => console.error('plugin watcher error:', e.message));
+  // Rescans run one at a time (a settings POST and a hand edit of config.json
+  // can both trigger one), and the watcher is always recreated even if the
+  // rescan fails, so live updates can never be left switched off.
+  let rescanChain = Promise.resolve();
+  const rescanForIgnorePaths = async () => {
     try { await watcher.close(); } catch (_) {}
-    state.entries = await scanVaultEntries(state.cfg.vaultPath, state.cfg.ignorePaths);
-    await rebuild();
-    watcher = createVaultWatcher();
-    console.log('ignorePaths changed: vault rescanned');
+    // Invalidate parses still in flight from the old watcher.
+    state.fsPending = new Map();
+    try {
+      state.entries = await scanVaultEntries(state.cfg.vaultPath, state.cfg.ignorePaths);
+      await rebuild();
+      console.log('ignorePaths changed: vault rescanned');
+    } finally {
+      watcher = createVaultWatcher();
+    }
+  };
+  state.onIgnorePathsChanged = () => {
+    const run = rescanChain.then(rescanForIgnorePaths);
+    rescanChain = run.catch(e => console.error(`rescan failed: ${e.message}`));
+    return run;
   };
 
   server.listen(state.cfg.port, '127.0.0.1', () => {
@@ -1347,11 +2089,20 @@ async function startApp(options = {}) {
     console.log(`settings:   http://127.0.0.1:${state.cfg.port}/settings.html`);
   });
 
-  server.on('error', e => {
+  server.on('error', async e => {
     if (e.code === 'EADDRINUSE') {
-      console.error(`Port ${state.cfg.port} is already in use. Another instance may be running, or pick a different port:`);
-      console.error(`  • edit "port" in ${path.basename(state.configPath)}, or`);
-      console.error(`  • start with a free port, e.g. --port ${state.cfg.port + 1}`);
+      const port = state.cfg.port;
+      if (await probeOwnInstance(port)) {
+        // A second launch (login item + manual start, launchd + npm start) is
+        // not an error: the wallpaper is already being served.
+        console.log(`obsidian-live-wallpaper is already running at http://127.0.0.1:${port} — nothing to do.`);
+        process.exit(0);
+      }
+      console.error(`Port ${port} is already in use by another program. Pick a different port:`);
+      console.error(`  • edit "port" in ${state.configPath}`);
+      // Only the npx/olw CLI parses --port; `npm start` reads the config file.
+      if (options.portFlag) console.error(`  • or start with a free port, e.g. ${options.portFlag} ${port + 1}`);
+      console.error('Then point your wallpaper host at the new http://127.0.0.1:<port> URL.');
     } else {
       console.error(`server error: ${e.message}`);
     }
@@ -1369,6 +2120,12 @@ async function startApp(options = {}) {
     }
     try { await watcher.close(); } catch (_) {}
     try { await configWatcher.close(); } catch (_) {}
+    try { await pluginWatcher.close(); } catch (_) {}
+    if (state.graphRecheckTimer) clearTimeout(state.graphRecheckTimer);
+    if (state.layoutSaveTimer && state.layout) {
+      clearTimeout(state.layoutSaveTimer);
+      try { writeConfigFile(state.layout, layoutPath(state)); } catch (_) {}
+    }
     if (state.graphJson && state.outPath) {
       try { await writeGraphFile(state.graphJson, state.outPath); } catch (_) {}
     }
@@ -1381,7 +2138,7 @@ async function startApp(options = {}) {
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 
-  return { server, get watcher() { return watcher; }, configWatcher, state, rebuild };
+  return { server, get watcher() { return watcher; }, configWatcher, pluginWatcher, pluginWatcherReady, state, rebuild };
 }
 
 if (require.main === module) {
@@ -1413,5 +2170,15 @@ module.exports = {
   materializeGraph,
   applyFsEventToState,
   rebuildGraphState,
-  isIgnoredPath
+  validatePluginGraph,
+  materializePluginGraph,
+  validatePluginActive,
+  chooseGraphSource,
+  pluginDir,
+  PLUGIN_ID,
+  isIgnoredPath,
+  isTrustedHost,
+  isJsonContentType,
+  sanitizeCustomPresets,
+  MAX_CUSTOM_PRESETS
 };
