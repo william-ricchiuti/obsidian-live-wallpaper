@@ -20,6 +20,8 @@
 //   S.pal           palette override (array) or null
 //   S.stats         { notes, links, recent, unresolved }
 //   S.bfs(i)        cached hop distances (Int16Array, -1 unreachable) from node i
+//   S.linkStep      draw every linkStep-th link (large-vault budget; 1 = all)
+//   S.labelCount    max labels to draw; S.labelMinImportance  min n.imp for a label
 //
 // Themes must not depend on renderer globals; everything they need is on S.
 (function () {

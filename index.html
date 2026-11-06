@@ -2433,6 +2433,11 @@ function buildScene() {
   S.o = { labels: cfg.hubLabels ? cfg.labelSource : 'off', colorBy: cfg.nodeColorMode, overlay: cfg.overlay };
   S.pal = palette;
   S.cfg = cfg;
+  // Large-vault budgets, so scene themes can honour the same caps as the
+  // default pipeline: draw every linkStep-th link, at most labelCount labels.
+  S.linkStep = Math.max(1, sceneTuning.linkStep | 0);
+  S.labelCount = Math.max(0, sceneTuning.labelCount | 0);
+  S.labelMinImportance = sceneTuning.labelMinImportance || 0;
   return S;
 }
 
