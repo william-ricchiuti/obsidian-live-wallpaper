@@ -34,7 +34,20 @@ const OPTION_CASES = [
   ['webgl renderer', { renderer: 'webgl' }],
   ['framing none (legacy)', { framing: 'none' }]
 ];
-const PORT = 3997;
+const net = require('net');
+let PORT = 0; // picked at startup, see freePort()
+// A port nobody else holds right now. Fixed ports let a second copy of the app
+// (another checkout's test run, a running wallpaper) answer instead, and the
+// server's "already running" path then exits 0: a silent false pass.
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.unref();
+    srv.on('error', reject);
+    srv.listen(0, '127.0.0.1', () => { const { port } = srv.address(); srv.close(() => resolve(port)); });
+  });
+}
+
 
 function log(msg) { process.stdout.write(msg + '\n'); }
 
@@ -110,6 +123,7 @@ async function main() {
   fs.writeFileSync(path.join(vault, 'A.md'), '#x\n[[B]]\n');
   fs.writeFileSync(path.join(vault, 'B.md'), 'b\n');
   const configPath = path.join(dir, 'config.json');
+  PORT = await freePort();
   fs.writeFileSync(configPath, JSON.stringify({ vaultPath: vault, port: PORT }));
 
   const app = await startApp({ configPath, outPath: path.join(dir, 'graph.json') });

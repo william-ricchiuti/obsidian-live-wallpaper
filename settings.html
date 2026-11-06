@@ -489,7 +489,7 @@ function buildFields() {
     } else if (f.t === 'int') {
       el.addEventListener('change', () => {
         const n = parseInt(el.value, 10);
-        if (!Number.isFinite(n)) { status(`${f.label} must be a whole number`, 'err'); applyForm(false, new Set([f.k.split('.')[0]])); return; }
+        if (!Number.isFinite(n)) { showStatus(`${f.label} must be a whole number`, 'err'); applyForm(false, new Set([f.k.split('.')[0]])); return; }
         const v = Math.min(f.max, Math.max(f.min, n));
         el.value = v;
         save(patchFor(f.k, v));
@@ -568,7 +568,7 @@ function setConnStatus(connected) {
 }
 // Errors stay up until clicked, Escape, or the next status message; other
 // messages fade after 2 s.
-function status(msg, type) {
+function showStatus(msg, type) {
   const el = $('status');
   el.textContent = msg;
   el.className = 'status show ' + (type || '');
@@ -624,12 +624,12 @@ async function postConfig(patch) {
   }
   if (ok) {
     setConnStatus(true);
-    if (inflight === 0) status('Saved', 'ok');
+    if (inflight === 0) showStatus('Saved', 'ok');
     // Not forced: the control the user is typing in keeps its text.
     applyForm();
     return true;
   }
-  status(friendlyError(err, 'Save failed'), 'err');
+  showStatus(friendlyError(err, 'Save failed'), 'err');
   // Revert only the rejected keys (even if focused); leave other in-progress edits alone.
   applyForm(false, new Set(Object.keys(patch)));
   return false;
@@ -647,7 +647,7 @@ async function loadConfig() {
     setConnStatus(true);
     applyForm();
   } catch (e) {
-    status('Failed to load config', 'err');
+    showStatus('Failed to load config', 'err');
     setConnStatus(false);
   }
 }
@@ -681,7 +681,7 @@ $('rotateThemes').addEventListener('change', () => {
   save({ rotate: { themes, everyMinutes } });
 });
 async function loadThemes() {
-  try { THEMES = await getJson('/api/themes'); } catch (e) { THEMES = []; status('Failed to load styles', 'err'); }
+  try { THEMES = await getJson('/api/themes'); } catch (e) { THEMES = []; showStatus('Failed to load styles', 'err'); }
   renderThemes();
 }
 
@@ -752,8 +752,8 @@ $('presets').addEventListener('click', async e => {
       if (!r.ok) throw new Error(data.error || 'delete failed');
       CUSTOM = data;
       renderPresets();
-      status('Preset deleted', 'ok');
-    } catch (err) { status(friendlyError(err, 'Delete failed'), 'err'); }
+      showStatus('Preset deleted', 'ok');
+    } catch (err) { showStatus(friendlyError(err, 'Delete failed'), 'err'); }
     return;
   }
   const btn = e.target.closest('.preset');
@@ -785,17 +785,17 @@ $('saveCustomForm').addEventListener('submit', async e => {
   e.preventDefault();
   const input = $('customName');
   const name = input.value.trim();
-  if (!name) { status('Give the preset a name', 'err'); input.focus(); return; }
+  if (!name) { showStatus('Give the preset a name', 'err'); input.focus(); return; }
   try {
     CUSTOM = await postCustomPreset(name, presetConfigFrom(cfg));
     input.value = '';
     renderPresets();
-    status('Saved preset: ' + name, 'ok');
-  } catch (err) { status(friendlyError(err, 'Save failed'), 'err'); }
+    showStatus('Saved preset: ' + name, 'ok');
+  } catch (err) { showStatus(friendlyError(err, 'Save failed'), 'err'); }
 });
 
 async function migrateLocalPresets(defaults) {
-  let stored = [];
+  let stored;
   try { stored = JSON.parse(localStorage.getItem('vaultwallpaper-custom') || '[]'); } catch (e) { return; }
   if (!Array.isArray(stored) || !stored.length) return;
   let ok = true;
@@ -812,7 +812,7 @@ async function migrateLocalPresets(defaults) {
 }
 
 async function loadPresets() {
-  try { BUILTIN = await getJson('/presets.json'); } catch (e) { BUILTIN = []; status('Failed to load presets', 'err'); }
+  try { BUILTIN = await getJson('/presets.json'); } catch (e) { BUILTIN = []; showStatus('Failed to load presets', 'err'); }
   try { CUSTOM = await getJson('/api/custom-presets'); } catch (e) { CUSTOM = []; }
   try { await migrateLocalPresets(await getJson('/api/defaults')); } catch (e) { /* ignore */ }
   renderPresets();
@@ -827,13 +827,13 @@ function exportableConfig() {
 $('copyConfig').addEventListener('click', async () => {
   try {
     await navigator.clipboard.writeText(JSON.stringify(exportableConfig(), null, 2));
-    status('Copied to clipboard', 'ok');
-  } catch (e) { status('Copy failed: ' + e.message, 'err'); }
+    showStatus('Copied to clipboard', 'ok');
+  } catch (e) { showStatus('Copy failed: ' + e.message, 'err'); }
 });
 async function applyJsonText(text) {
   let parsed;
-  try { parsed = JSON.parse(text); } catch (e) { status('Paste failed: not valid JSON', 'err'); return false; }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) { status('Paste failed: expected a JSON object', 'err'); return false; }
+  try { parsed = JSON.parse(text); } catch (e) { showStatus('Paste failed: not valid JSON', 'err'); return false; }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) { showStatus('Paste failed: expected a JSON object', 'err'); return false; }
   return save(parsed);
 }
 $('pasteConfig').addEventListener('click', async () => {
@@ -854,8 +854,8 @@ $('resetYes').addEventListener('click', async () => {
   $('resetConfirm').hidden = true;
   try {
     const defaults = await getJson('/api/defaults'); // includes labelStyle: {} and tagColors: {}
-    if (await save(defaults)) status('Reset to defaults', 'ok');
-  } catch (e) { status(friendlyError(e, 'Reset failed'), 'err'); }
+    if (await save(defaults)) showStatus('Reset to defaults', 'ok');
+  } catch (e) { showStatus(friendlyError(e, 'Reset failed'), 'err'); }
 });
 
 // ---------- safe area / ignore paths ----------
@@ -865,7 +865,7 @@ document.querySelectorAll('[data-safe]').forEach(b => b.addEventListener('click'
 }));
 document.querySelectorAll('.safe-grid input').forEach(inp => inp.addEventListener('change', () => {
   const n = parseInt(inp.value, 10);
-  if (!Number.isFinite(n)) { status('Safe area must be a whole number of pixels', 'err'); applyForm(false, new Set(['safeArea'])); return; }
+  if (!Number.isFinite(n)) { showStatus('Safe area must be a whole number of pixels', 'err'); applyForm(false, new Set(['safeArea'])); return; }
   const sa = { top: 0, right: 0, bottom: 0, left: 0, ...(cfg.safeArea || {}) };
   sa[inp.dataset.side] = Math.min(1000, Math.max(0, n));
   save({ safeArea: sa });
@@ -973,7 +973,7 @@ async function loadTags() {
 $('exportPng').addEventListener('click', () => {
   const w = window.open('/?export=1', '_blank');
   $('exportLink').hidden = !!w;
-  if (!w) status('Pop-up blocked — use the "Open export page" link', 'err');
+  if (!w) showStatus('Pop-up blocked — use the "Open export page" link', 'err');
 });
 
 // ---------- page theme ----------
@@ -998,7 +998,7 @@ document.addEventListener('keydown', e => {
     // edit (blur fires its 'change'). Re-posting the whole config would let one
     // key the server rejects fail the entire save.
     if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA')) a.blur();
-    if (inflight === 0) status('All changes are saved', 'ok');
+    if (inflight === 0) showStatus('All changes are saved', 'ok');
   }
   if (e.key === 'Escape') {
     $('status').className = 'status';

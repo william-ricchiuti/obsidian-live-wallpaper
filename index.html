@@ -815,9 +815,7 @@ function applyRenderableCap() {
   focusSet = computeFocusSet();
   const cfgCap = finiteNumber(cfg.maxRenderedNodes) ? Math.floor(cfg.maxRenderedNodes) : 0;
   const tierCap = sceneTuning.maxRenderedNodes || 0;
-  let cap = 0;
-  if (cfgCap > 0 && tierCap > 0) cap = Math.min(cfgCap, tierCap);
-  else cap = cfgCap || tierCap;
+  const cap = cfgCap > 0 && tierCap > 0 ? Math.min(cfgCap, tierCap) : (cfgCap || tierCap);
   // With a focus note the cap applies within its neighbourhood, so a
   // low-degree focus note still shows its most important neighbours instead
   // of whatever happened to survive the vault-wide top-N.
@@ -2953,7 +2951,7 @@ document.addEventListener('visibilitychange', () => {
 // pause and keeps running page JS, so without this the loop burns CPU.
 let hostPaused = false;
 window.livelyWallpaperPlaybackChanged = function (data) {
-  let paused = false;
+  let paused;
   try { paused = !!(typeof data === 'string' ? JSON.parse(data) : data).IsPaused; } catch (_) { return; }
   if (paused === hostPaused) return;
   hostPaused = paused;

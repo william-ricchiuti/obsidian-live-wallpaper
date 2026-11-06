@@ -26,8 +26,8 @@ Node 20.19+ is required (chokidar 5's floor); `.nvmrc` pins 22 for development.
 npm test          # parser/server smoke + renderer smoke
 npm run smoke         # parser & HTTP handler only (no browser needed)
 npm run smoke:render  # renderer in headless Chrome (skips if no Chrome found)
-npm run lint          # ESLint over the .js files
-npm run lint:html     # ESLint over the inline scripts in index.html/settings.html
+npm run lint          # ESLint over the .js files and the inline scripts in the two HTML pages
+npm run lint:html     # just the inline scripts in index.html/settings.html
 ```
 
 `npm run smoke:render` looks for Chrome/Chromium automatically. To point it at a

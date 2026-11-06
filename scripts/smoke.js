@@ -28,6 +28,19 @@ const {
   THEME_LIST
 } = require('../parser.js');
 const core = require('../renderer-core.js');
+
+// A port nobody else holds right now. Fixed ports let a second copy of the app
+// (another checkout's test run, a running wallpaper) answer instead, and the
+// server's "already running" path then exits 0: a silent false pass.
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.unref();
+    srv.on('error', reject);
+    srv.listen(0, '127.0.0.1', () => { const { port } = srv.address(); srv.close(() => resolve(port)); });
+  });
+}
+
 const layoutCore = require('../layout-core.js');
 
 function assert(condition, message) {
@@ -530,7 +543,7 @@ async function runLiveWatcherDotAncestor(tmpRoot) {
   writeFile(path.join(vaultDir, 'Alpha.md'), '# Alpha\n');
   fs.mkdirSync(path.join(vaultDir, '.obsidian'), { recursive: true });
   const configPath = path.join(tmpRoot, 'dotparent-config.json');
-  writeJson(configPath, { vaultPath: vaultDir, port: 3997 });
+  writeJson(configPath, { vaultPath: vaultDir, port: await freePort() });
   const app = await startApp({ configPath, outPath: path.join(tmpRoot, 'dotparent-graph.json') });
   const waitForVersion = async (above, timeoutMs) => {
     const deadline = Date.now() + timeoutMs;
@@ -583,7 +596,7 @@ async function runLiveWatcherWithIgnorePaths(tmpRoot) {
   writeFile(path.join(vaultDir, 'templates', 'Template.md'), '# Template\n');
   fs.mkdirSync(path.join(vaultDir, 'notes.v2'), { recursive: true });
   const configPath = path.join(tmpRoot, 'live-config.json');
-  writeJson(configPath, { vaultPath: vaultDir, port: 3998, ignorePaths: ['templates', '.obsidian'] });
+  writeJson(configPath, { vaultPath: vaultDir, port: await freePort(), ignorePaths: ['templates', '.obsidian'] });
 
   const app = await startApp({ configPath, outPath: path.join(tmpRoot, 'live-graph.json') });
   const waitForVersion = async (above, timeoutMs) => {
