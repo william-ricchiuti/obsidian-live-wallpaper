@@ -66,8 +66,15 @@
     return c;
   }
 
+  // Off-screen parking spot for vertices whose node has no position yet; the
+  // GPU clips them away.
+  const FAR = -1e6;
+
   function create(canvas) {
-    const gl = canvas.getContext('webgl2', { premultipliedAlpha: true, alpha: true, antialias: true, preserveDrawingBuffer: true });
+    // No preserveDrawingBuffer: it costs an extra copy every frame. Callers
+    // that read the canvas (export, cross-fade snapshot) call redraw() first,
+    // in the same task, so the drawing buffer is valid when they read it.
+    const gl = canvas.getContext('webgl2', { premultipliedAlpha: true, alpha: true, antialias: true, preserveDrawingBuffer: false });
     if (!gl) return null;
     let pointProg, lineProg;
     try {
@@ -83,11 +90,55 @@
         res: gl.getUniformLocation(pointProg, 'u_res'), dpr: gl.getUniformLocation(pointProg, 'u_dpr'), glow: gl.getUniformLocation(pointProg, 'u_glow') },
       l: { pos: gl.getAttribLocation(lineProg, 'a_pos'), color: gl.getAttribLocation(lineProg, 'a_color'), res: gl.getUniformLocation(lineProg, 'u_res') }
     };
-    const pointBuf = gl.createBuffer();
-    const lineBuf = gl.createBuffer();
-    let pointData = new Float32Array(0);
-    let lineData = new Float32Array(0);
+    // Positions change every frame while anything moves; colours and sizes
+    // only when the graph or the settings change. They live in separate
+    // buffers so a moving frame uploads 2 floats per vertex, not 6-7.
+    const pointPosBuf = gl.createBuffer();
+    const pointAttrBuf = gl.createBuffer();
+    const linePosBuf = gl.createBuffer();
+    const lineColorBuf = gl.createBuffer();
+    const pointVao = gl.createVertexArray();
+    gl.bindVertexArray(pointVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, pointPosBuf);
+    gl.enableVertexAttribArray(loc.p.pos);
+    gl.vertexAttribPointer(loc.p.pos, 2, gl.FLOAT, false, 8, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, pointAttrBuf);
+    gl.enableVertexAttribArray(loc.p.size);
+    gl.vertexAttribPointer(loc.p.size, 1, gl.FLOAT, false, 20, 0);
+    gl.enableVertexAttribArray(loc.p.color);
+    gl.vertexAttribPointer(loc.p.color, 4, gl.FLOAT, false, 20, 4);
+    const lineVao = gl.createVertexArray();
+    gl.bindVertexArray(lineVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, linePosBuf);
+    gl.enableVertexAttribArray(loc.l.pos);
+    gl.vertexAttribPointer(loc.l.pos, 2, gl.FLOAT, false, 8, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, lineColorBuf);
+    gl.enableVertexAttribArray(loc.l.color);
+    gl.vertexAttribPointer(loc.l.color, 4, gl.FLOAT, false, 16, 0);
+    gl.bindVertexArray(null);
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
+    let pointPos = new Float32Array(0), pointAttr = new Float32Array(0);
+    let linePos = new Float32Array(0), lineColor = new Float32Array(0);
+    // GPU-side capacity (in floats) of each buffer: grown with bufferData,
+    // otherwise refilled in place with bufferSubData.
+    const cap = { pp: 0, pa: 0, lp: 0, lc: 0 };
+    let nodeList = [], linkList = [];
+    let nodeCount = 0, edgeCount = 0;
+    let staticKey = null, posKey = null;
+    let lastAdditive = null, lastGlow = null;
+    let needsRender = true;
     let W = 1, H = 1, dpr = 1;
+
+    function upload(buf, data, used, capKey) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      if (cap[capKey] < used) {
+        cap[capKey] = data.length;
+        gl.bufferData(gl.ARRAY_BUFFER, data, gl.DYNAMIC_DRAW);
+      } else if (used > 0) {
+        gl.bufferSubData(gl.ARRAY_BUFFER, 0, data, 0, used);
+      }
+    }
 
     function resize(w, h, ratio) {
       W = w; H = h; dpr = ratio;
@@ -96,81 +147,130 @@
       canvas.style.width = w + 'px';
       canvas.style.height = h + 'px';
       gl.viewport(0, 0, canvas.width, canvas.height);
+      needsRender = true;
     }
 
-    // opts: { nodes, links, colorOf(node), edgeColorOf(link), nodeAlpha(node),
-    //         nodeSize(node), edgeAlpha, additive, glow, visible(node) }
-    function draw(opts) {
+    // Colours, sizes and the set of drawn nodes/edges. Rebuilt only when
+    // opts.staticKey changes.
+    function buildStatic(opts) {
+      const nodes = opts.nodes, links = opts.links;
+      const include = opts.include;
+      nodeList = [];
+      for (let i = 0; i < nodes.length; i++) if (include(nodes[i])) nodeList.push(nodes[i]);
+      linkList = [];
+      const step = Math.max(1, opts.linkStep || 1);
+      for (let i = 0; i < links.length; i += step) {
+        const l = links[i];
+        if (include(l.source) && include(l.target)) linkList.push(l);
+      }
+      nodeCount = nodeList.length;
+      edgeCount = linkList.length;
+      if (pointPos.length < nodeCount * 2) { pointPos = new Float32Array(nodeCount * 2); pointAttr = new Float32Array(nodeCount * 5); }
+      if (linePos.length < edgeCount * 4) { linePos = new Float32Array(edgeCount * 4); lineColor = new Float32Array(edgeCount * 8); }
+      for (let i = 0; i < nodeCount; i++) {
+        const n = nodeList[i];
+        const c = hexToUnit(opts.colorOf(n), colorCache);
+        const o = i * 5;
+        pointAttr[o] = opts.nodeSize(n);
+        pointAttr[o + 1] = c[0]; pointAttr[o + 2] = c[1]; pointAttr[o + 3] = c[2]; pointAttr[o + 4] = opts.nodeAlpha(n);
+      }
+      const al = opts.edgeAlpha;
+      for (let i = 0; i < edgeCount; i++) {
+        const c = hexToUnit(opts.edgeColorOf(linkList[i]), colorCache);
+        const o = i * 8;
+        lineColor[o] = lineColor[o + 4] = c[0];
+        lineColor[o + 1] = lineColor[o + 5] = c[1];
+        lineColor[o + 2] = lineColor[o + 6] = c[2];
+        lineColor[o + 3] = lineColor[o + 7] = al;
+      }
+      upload(pointAttrBuf, pointAttr, nodeCount * 5, 'pa');
+      upload(lineColorBuf, lineColor, edgeCount * 8, 'lc');
+      if (colorCache.size > 1024) colorCache.clear();
+    }
+
+    function writePositions() {
+      for (let i = 0; i < nodeCount; i++) {
+        const n = nodeList[i];
+        const x = n.__fx, y = n.__fy;
+        const ok = x === x && y === y; // neither is NaN
+        pointPos[i * 2] = ok ? x : FAR; pointPos[i * 2 + 1] = ok ? y : FAR;
+      }
+      for (let i = 0; i < edgeCount; i++) {
+        const l = linkList[i];
+        const a = l.source, b = l.target;
+        const o = i * 4;
+        if (a.__fx === a.__fx && a.__fy === a.__fy && b.__fx === b.__fx && b.__fy === b.__fy) {
+          linePos[o] = a.__fx; linePos[o + 1] = a.__fy; linePos[o + 2] = b.__fx; linePos[o + 3] = b.__fy;
+        } else {
+          linePos[o] = linePos[o + 1] = linePos[o + 2] = linePos[o + 3] = FAR;
+        }
+      }
+      upload(pointPosBuf, pointPos, nodeCount * 2, 'pp');
+      upload(linePosBuf, linePos, edgeCount * 4, 'lp');
+    }
+
+    function render(additive, glow) {
       gl.clearColor(0, 0, 0, 0);
       gl.clear(gl.COLOR_BUFFER_BIT);
       gl.enable(gl.BLEND);
-      if (opts.additive) gl.blendFunc(gl.ONE, gl.ONE);
+      if (additive) gl.blendFunc(gl.ONE, gl.ONE);
       else gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-
-      // Edges: 2 vertices x (x, y, r, g, b, a)
-      const links = opts.links;
-      const step = Math.max(1, opts.linkStep || 1);
-      const maxEdges = Math.ceil(links.length / step);
-      if (lineData.length < maxEdges * 12) lineData = new Float32Array(maxEdges * 12);
-      let e = 0;
-      for (let i = 0; i < links.length; i += step) {
-        const l = links[i];
-        const a = l.source, b = l.target;
-        if (!opts.visible(a) || !opts.visible(b)) continue;
-        const c = hexToUnit(opts.edgeColorOf(l), colorCache);
-        const al = opts.edgeAlpha;
-        lineData.set([a.__fx, a.__fy, c[0], c[1], c[2], al, b.__fx, b.__fy, c[0], c[1], c[2], al], e * 12);
-        e++;
-      }
-      if (e > 0) {
+      if (edgeCount > 0) {
         gl.useProgram(lineProg);
         gl.uniform2f(loc.l.res, W, H);
-        gl.bindBuffer(gl.ARRAY_BUFFER, lineBuf);
-        gl.bufferData(gl.ARRAY_BUFFER, lineData.subarray(0, e * 12), gl.STREAM_DRAW);
-        gl.enableVertexAttribArray(loc.l.pos);
-        gl.vertexAttribPointer(loc.l.pos, 2, gl.FLOAT, false, 24, 0);
-        gl.enableVertexAttribArray(loc.l.color);
-        gl.vertexAttribPointer(loc.l.color, 4, gl.FLOAT, false, 24, 8);
-        gl.drawArrays(gl.LINES, 0, e * 2);
+        gl.bindVertexArray(lineVao);
+        gl.drawArrays(gl.LINES, 0, edgeCount * 2);
       }
-
-      // Nodes: x, y, size, r, g, b, a
-      const nodes = opts.nodes;
-      if (pointData.length < nodes.length * 7) pointData = new Float32Array(nodes.length * 7);
-      let p = 0;
-      for (let i = 0; i < nodes.length; i++) {
-        const n = nodes[i];
-        if (!opts.visible(n)) continue;
-        const c = hexToUnit(opts.colorOf(n), colorCache);
-        const o = p * 7;
-        pointData[o] = n.__fx; pointData[o + 1] = n.__fy; pointData[o + 2] = opts.nodeSize(n);
-        pointData[o + 3] = c[0]; pointData[o + 4] = c[1]; pointData[o + 5] = c[2]; pointData[o + 6] = opts.nodeAlpha(n);
-        p++;
-      }
-      if (p > 0) {
+      if (nodeCount > 0) {
         gl.useProgram(pointProg);
         gl.uniform2f(loc.p.res, W, H);
         gl.uniform1f(loc.p.dpr, dpr);
-        gl.uniform1f(loc.p.glow, opts.glow);
-        gl.bindBuffer(gl.ARRAY_BUFFER, pointBuf);
-        gl.bufferData(gl.ARRAY_BUFFER, pointData.subarray(0, p * 7), gl.STREAM_DRAW);
-        gl.enableVertexAttribArray(loc.p.pos);
-        gl.vertexAttribPointer(loc.p.pos, 2, gl.FLOAT, false, 28, 0);
-        gl.enableVertexAttribArray(loc.p.size);
-        gl.vertexAttribPointer(loc.p.size, 1, gl.FLOAT, false, 28, 8);
-        gl.enableVertexAttribArray(loc.p.color);
-        gl.vertexAttribPointer(loc.p.color, 4, gl.FLOAT, false, 28, 12);
-        gl.drawArrays(gl.POINTS, 0, p);
+        gl.uniform1f(loc.p.glow, glow);
+        gl.bindVertexArray(pointVao);
+        gl.drawArrays(gl.POINTS, 0, nodeCount);
       }
-      return p;
+      gl.bindVertexArray(null);
+      lastAdditive = additive; lastGlow = glow;
+      needsRender = false;
+    }
+
+    // opts: { nodes, links, linkStep, include(node), colorOf(node),
+    //         edgeColorOf(link), nodeAlpha(node), nodeSize(node), edgeAlpha,
+    //         additive, glow, staticKey, posKey }
+    // staticKey changes whenever colours, sizes or the drawn set may change;
+    // posKey whenever any position may have moved ('' means "every frame").
+    // When neither changed nothing is rebuilt, uploaded or drawn: the canvas
+    // keeps showing the last frame. Returns the number of nodes drawn.
+    function draw(opts) {
+      if (!opts.staticKey || opts.staticKey !== staticKey) {
+        staticKey = opts.staticKey;
+        buildStatic(opts);
+        posKey = null;
+        needsRender = true;
+      }
+      if (!opts.posKey || opts.posKey !== posKey) {
+        posKey = opts.posKey;
+        writePositions();
+        needsRender = true;
+      }
+      if (needsRender || opts.additive !== lastAdditive || opts.glow !== lastGlow) render(opts.additive, opts.glow);
+      return nodeCount;
+    }
+
+    // Re-issues the last frame from the uploaded buffers (no CPU rebuild), so
+    // a caller can read the canvas in the same task.
+    function redraw() {
+      if (lastAdditive === null) return;
+      render(lastAdditive, lastGlow);
     }
 
     function clear() {
       gl.clearColor(0, 0, 0, 0);
       gl.clear(gl.COLOR_BUFFER_BIT);
+      staticKey = null; posKey = null; needsRender = true;
     }
 
-    return { resize, draw, clear, canvas };
+    return { resize, draw, redraw, clear, canvas };
   }
 
   window.GLRenderer = { create };
