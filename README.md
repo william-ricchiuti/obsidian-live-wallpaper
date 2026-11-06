@@ -14,6 +14,18 @@ Obsidian Live Wallpaper turns your vault graph into a live desktop backdrop: glo
 
 **macOS, Windows, and Linux.**
 
+## ✨ What's New in v1.3
+
+- **Exact Obsidian links and the open note.** The optional [Live Wallpaper Bridge](obsidian-plugin/README.md) plugin hands the wallpaper Obsidian's own link and tag index, so the graph matches Obsidian's graph view, and the note you have open is highlighted on your desktop (`highlightActiveNote`). Without the plugin, or when notes changed while Obsidian was closed, the server's own scan is used (`graphSource`).
+- **Start at login with one command:** `olw install --vault <path>` sets up launchd (macOS), a systemd user service (Linux) or Task Scheduler (Windows); `olw uninstall` removes it.
+- **Idles properly.** One new note used to keep the wallpaper at full frame rate until it was deleted; it now drops back to `idleFps`, which defaults to 5. Animated themes (LED, Mycelium, Phosphor, Synapse) keep a smooth 15 fps.
+- **Starts where it left off.** The settled layout is saved, so a reload, host restart or wake from sleep doesn't recompute or reshuffle the graph.
+- **Recovers on its own** after a server restart, a theme that fails to load or throws, or a GPU reset, and stops drawing while Lively pauses it.
+- **Closer to Obsidian:** links and tags inside code are ignored, `[text](Note.md)` links count, Unicode and digit tags work, tags merge regardless of case, and a `[[Note]]` with several same-named notes links to one.
+- **Faster on big vaults:** themes honour the large-vault limits and build heavy shapes once per layout; the WebGL path keeps its buffers between frames.
+
+See the [changelog](CHANGELOG.md) for everything else, including security hardening and the many bug fixes.
+
 ## ✨ What's New in v1.2
 
 Sixteen themes that each draw the graph a different way, plus new composition and battery options. Every theme is also a one-click preset.
@@ -46,7 +58,7 @@ Sixteen themes that each draw the graph a different way, plus new composition an
 - **`focusNote`**: shows only one note's neighbourhood. `today` means today's daily note.
 - **`rotate`**: cycles through a list of themes every N minutes.
 - **`palette`**: named palettes that work with any theme. **`tagShapes`**: a shape per tag. **`grain`** and **`vignette`**.
-- **`maxFps` / `idleFps`**: the wallpaper now idles at 5 fps by default, and `idleFps: 0` holds a still frame until something changes. It used to redraw at 60 fps forever whenever edge particles were on.
+- **`maxFps` / `idleFps`**: the wallpaper now idles at 10 fps by default, and `idleFps: 0` holds a still frame until something changes. It used to redraw at 60 fps forever whenever edge particles were on.
 - **Span across monitors**: open `/?span=1of2` and `/?span=2of2` on two screens to show one layout across both.
 - **Export PNG**: a button in settings, or open `/?export=1`.
 
@@ -96,7 +108,7 @@ settings page — or use it as a starting point and tweak.
 
 ## Install
 
-You'll need [Node.js](https://nodejs.org) (v20+) and a wallpaper host app:
+You'll need [Node.js](https://nodejs.org) (v20.19 or newer) and a wallpaper host app:
 
 - **macOS**: [Plash](https://apps.apple.com/us/app/plash/id1494023538) (free, Mac App Store)
 - **Windows**: [Lively Wallpaper](https://www.rocksdanister.com/lively/) (free, open source)
@@ -110,6 +122,18 @@ npx obsidian-live-wallpaper --vault "/path/to/your/Obsidian/vault"
 
 This writes a small config in the current folder and starts the server. Then
 point your wallpaper host at the printed `http://127.0.0.1:3000` URL.
+
+**Start it at login:**
+
+```bash
+npm install -g obsidian-live-wallpaper
+olw install --vault "/path/to/your/Obsidian/vault"
+```
+
+`olw install` registers a per-user login item (launchd, systemd or Task Scheduler) that
+restarts the server if it crashes; `olw install --dry-run` shows what it would write, and
+`olw uninstall` removes it. Install globally first: an autostart pointing into the
+temporary `npx` cache would break when that cache is cleared.
 
 **Or clone it** (best if you want to customize or contribute):
 
@@ -139,6 +163,14 @@ Point your wallpaper host to `http://127.0.0.1:3000` (examples below assume the 
 
 Open `http://127.0.0.1:3000/settings.html` to customize the visual settings. `vaultPath` and `port` stay in `config.json`.
 
+### Exact links and the open note (optional Obsidian plugin)
+
+The [Live Wallpaper Bridge](obsidian-plugin/README.md) plugin in `obsidian-plugin/` writes
+Obsidian's own resolved links, tags and the currently open note to its plugin folder,
+and the server picks them up automatically. The graph then matches Obsidian exactly, and
+the note you're editing glows on the desktop. It isn't in the community plugin directory
+yet; the README there has the manual install steps.
+
 ### Use it inside Obsidian
 
 You can also use the graph as a background inside Obsidian itself with the [Live Background](https://github.com/DynamicPlayerSector/obsidian-live-background) community plugin. Point it at `http://127.0.0.1:3000`. For use behind notes, the **Plain**, **Blueprint**, or **Parchment** presets stay out of the way; **Ambient** or **Neon** work better as a standalone wallpaper.
@@ -160,7 +192,7 @@ Three layers, each ignorant of the others:
              /api/config, /events
 ```
 
-1. **`parser.js`** watches your vault, parses `[[wikilinks]]` and tags from every `.md` file, and serves the graph and app on the local loopback interface (`127.0.0.1:3000` by default). The graph is held in memory and served at `/graph.json`; changes are pushed to the page over a server-sent-events stream, so nothing is handed off through files (a `graph.json` copy is only written next to the config at startup and shutdown, as a cold-start fallback and debugging aid). Links resolve the way Obsidian does: case-insensitively, by path, and ignoring image and PDF embeds.
+1. **`parser.js`** watches your vault, parses `[[wikilinks]]` and tags from every `.md` file, and serves the graph and app on the local loopback interface (`127.0.0.1:3000` by default). The graph is held in memory and served at `/graph.json`; changes are pushed to the page over a server-sent-events stream, so nothing is handed off through files (a `graph.json` copy is only written next to the config at startup and shutdown, as a cold-start fallback and debugging aid). Links resolve the way Obsidian does: case-insensitively, by path, and ignoring image and PDF embeds. With the optional Obsidian plugin installed, the graph comes from Obsidian's own index instead, and the server falls back to its scan whenever notes changed while Obsidian was closed.
 2. **`index.html`** fetches the graph over HTTP and runs the layout in a Web Worker (`worker.js` + `layout-core.js`). It draws with the active theme from `themes/`, and updates live when your vault changes. Editing a note's text doesn't move anything; adding a note only relaxes the layout around it.
 3. **Plash / Lively** renders the page as your desktop wallpaper.
 
@@ -240,6 +272,8 @@ The renderer ships with a local vendored copy of D3, so the wallpaper still work
 | `maxFps` | `30` | Frame cap while something is changing (`0`–`60`); `0` = only redraw on change |
 | `idleFps` | `5` | Frame rate once the scene is settled (`0`–`30`); `0` = hold the last frame (near-zero CPU) |
 | `renderer` | `"auto"` | `auto` uses WebGL2 for vaults over ~3,000 notes; force `canvas` or `webgl` |
+| `graphSource` | `"auto"` | Where the graph comes from: `auto` (the Obsidian plugin's graph while it matches the vault, otherwise the scan), `scan`, or `obsidian` (always the plugin's graph when present) |
+| `highlightActiveNote` | `true` | Highlight the note open in Obsidian (needs the Obsidian plugin) |
 
 ### Tags vs links
 
@@ -251,7 +285,7 @@ With `showUnresolvedLinks` on (the default), any `[[wikilink]]` that points to a
 
 ### Duplicate note names
 
-If two markdown files share the same basename (e.g. `Index.md` in different folders), the parser automatically prefixes their node IDs with the folder path so both appear in the graph. A `[[Index]]` wikilink will connect to all notes named `Index`. Labels still show the short name.
+If two markdown files share the same basename (e.g. `Index.md` in different folders), the parser automatically prefixes their node IDs with the folder path so both appear in the graph. A bare `[[Index]]` links to one of them: the one in the same folder as the linking note, otherwise the one with the shortest path. That approximates Obsidian's rule; with the Obsidian plugin installed you get Obsidian's exact answer. Labels still show the short name.
 
 ### Coloring modes
 

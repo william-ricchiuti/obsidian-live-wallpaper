@@ -1,13 +1,17 @@
 # Changelog
 
-## [Unreleased]
+## [1.3.0] - 2026-11-05
 
 ### Added
+- **Obsidian bridge plugin** (`obsidian-plugin/`): writes Obsidian's resolved links, tags and the open note to its plugin folder. The server uses that graph (`graphSource`: `auto` | `scan` | `obsidian`, default `auto`; in `auto` only while the plugin's notes match the notes on disk and nothing on disk is newer) and highlights the open note (`highlightActiveNote`, default `true`; `/api/active` and an SSE `active` event).
+- **`olw install` / `olw uninstall`**: per-user autostart via launchd, systemd or Task Scheduler, restarting only on failure, with `--dry-run`.
 - **Layout cache.** When the layout settles, the renderer saves node positions to `layout.json` next to the config (`/api/layout`). A reload (host restart, wake from sleep, display change) starts from that layout instead of recomputing it, and skips the simulation entirely when every note is in the cache.
 - **Lively pause support.** The renderer stops its frame loop while Lively pauses the wallpaper, if `"--pause-event true"` is set in the wallpaper's `LivelyInfo.json` (see `windows-setup.md`).
 - **Second launches exit cleanly.** If this app is already serving the port, a new instance says so and exits 0 instead of failing.
 
 ### Changed
+- **A bare `[[Note]]` matching several same-named notes links to one** (same folder first, then the shortest path), not to all of them.
+- **LED's baked board is capped near 4 Mpx** on high-DPI screens (it was ~33 MB at 1080p@2x).
 - **`idleFps` defaults to 5** (was 10). Configs that set `idleFps` explicitly keep their value; that includes configs copied from an older `config.example.json`, which had `10`.
 - **Links and tags closer to Obsidian:** links and `#tags` inside code blocks and inline code are ignored; `[text](Note.md)` markdown links count as links; tags may use any letter and digits (`#café`, `#2024-review`, but not `#2024`); frontmatter `tag:` and `tags: a, b` are read; tags are case-insensitive across the vault (the first spelling wins), so a `tagColors` key may need renaming.
 
