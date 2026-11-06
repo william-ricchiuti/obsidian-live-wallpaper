@@ -611,7 +611,7 @@ function materializeGraph(entries, vaultPath, options = {}) {
   const raw = Array.from(entries.values())
     .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
     .map(entry => ({ basename: entry.basename, filePath: entry.path, entry }));
-  const basenameCounts = {};
+  const basenameCounts = Object.create(null);
   for (const item of raw) {
     basenameCounts[item.basename] = (basenameCounts[item.basename] || 0) + 1;
   }
@@ -621,13 +621,13 @@ function materializeGraph(entries, vaultPath, options = {}) {
       .map(([basename]) => basename)
   );
 
-  const files = {};
-  const tags = {};
-  const allTags = {};
-  const basenameToIds = {};
+  const files = Object.create(null);
+  const tags = Object.create(null);
+  const allTags = Object.create(null);
+  const basenameToIds = Object.create(null);
   // Obsidian resolves links case-insensitively, so index lower-cased names too.
-  const lowerToIds = {};
-  const relPathToId = {};
+  const lowerToIds = Object.create(null);
+  const relPathToId = Object.create(null);
   for (const { basename, filePath, entry } of raw) {
     const id = noteId(basename, filePath, vaultPath, duplicatedBasenames);
     files[id] = {
@@ -708,7 +708,7 @@ function materializeGraph(entries, vaultPath, options = {}) {
     }
   }
 
-  const discoveredTags = {};
+  const discoveredTags = Object.create(null);
   for (const list of Object.values(allTags)) {
     for (const tag of list) discoveredTags[tag] = (discoveredTags[tag] || 0) + 1;
   }
