@@ -21,6 +21,7 @@
 //   S.stats         { notes, links, recent, unresolved }
 //   S.bfs(i)        cached hop distances (Int16Array, -1 unreachable) from node i
 //   S.linkStep      draw every linkStep-th link (large-vault budget; 1 = all)
+//   S.activeIndex   index in S.nodes of the note open in Obsidian (bridge plugin), or -1
 //   S.labelCount    max labels to draw; S.labelMinImportance  min n.imp for a label
 //
 // Anything derived only from the layout should be cached with K.memo (keyed on

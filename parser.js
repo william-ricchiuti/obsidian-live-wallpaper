@@ -1068,6 +1068,24 @@ function newestEntryMtime(entries) {
   return newest;
 }
 
+// True when the plugin graph's real (non-ghost) notes are exactly the notes
+// the scan found, after ignorePaths. Paths are vault-relative with '/'.
+function pluginNotesMatchScan(state) {
+  const plugin = state.pluginGraph;
+  const vault = state.cfg.vaultPath;
+  const patterns = state.cfg.ignorePaths || [];
+  const onDisk = new Set();
+  if (state.entries) for (const p of state.entries.keys()) onDisk.add(path.relative(vault, p).split(path.sep).join('/'));
+  let listed = 0;
+  for (const n of plugin.nodes) {
+    if (n.ghost || !n.path) continue;
+    if (patterns.length && isIgnoredPath(path.join(vault, n.path), vault, patterns)) continue;
+    if (!onDisk.has(n.path)) return false;
+    listed++;
+  }
+  return listed === onDisk.size;
+}
+
 // Which graph to serve: 'scan' never uses the plugin, 'obsidian' uses it
 // whenever a valid one exists, 'auto' only while it is fresh (see
 // PLUGIN_FRESH_SLACK_MS / PLUGIN_GRACE_MS). Edits made while Obsidian was
@@ -1078,7 +1096,11 @@ function chooseGraphSource(state, now = Date.now()) {
   if (mode === 'scan' || !plugin) return { source: 'scan' };
   if (mode === 'obsidian') return { source: 'obsidian' };
   const newest = newestEntryMtime(state.entries);
-  if (plugin.generatedAt >= newest - PLUGIN_FRESH_SLACK_MS) return { source: 'obsidian' };
+  // Fresh = no note on disk is newer than the plugin's last write AND the
+  // plugin lists exactly the notes on disk. The second check catches notes
+  // added, deleted or renamed while Obsidian was closed (a deletion leaves
+  // no newer mtime behind).
+  if (plugin.generatedAt >= newest - PLUGIN_FRESH_SLACK_MS && pluginNotesMatchScan(state)) return { source: 'obsidian' };
   const age = now - newest;
   if (state.liveGraphSource === 'obsidian' && age >= 0 && age < PLUGIN_GRACE_MS) {
     return { source: 'obsidian', recheckInMs: PLUGIN_GRACE_MS - age + 50 };

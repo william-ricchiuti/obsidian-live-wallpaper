@@ -50,7 +50,7 @@
     "smoke": "node scripts/smoke.js && node scripts/smoke-install.js",
     "smoke:render": "node scripts/smoke-render.js",
     "test": "npm run smoke && npm run smoke:render",
-    "lint": "eslint parser.js bin/cli.js lib/*.js worker.js renderer-core.js layout-core.js gl-renderer.js themes/*.js scripts/*.js eslint.config.js index.html settings.html",
+    "lint": "eslint parser.js bin/cli.js lib/*.js obsidian-plugin/*.js worker.js renderer-core.js layout-core.js gl-renderer.js themes/*.js scripts/*.js eslint.config.js index.html settings.html",
     "lint:html": "eslint index.html settings.html",
     "prepublishOnly": "npm run lint && npm test"
   },

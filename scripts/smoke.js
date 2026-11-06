@@ -957,6 +957,7 @@ async function runBridgeServerSelection(tmpRoot) {
   writeFile(path.join(dir, 'Alpha.md'), '[[Beta]]\n');
   writeFile(path.join(dir, 'Beta.md'), '#scan\n');
   writeFile(path.join(dir, 'templates', 'T.md'), 'x\n');
+  writeFile(path.join(dir, 'OnlyInPlugin.md'), 'x\n'); // on disk too, untagged: only the plugin graph tags it
   const old = new Date(Date.now() - 3600e3);
   for (const f of ['Alpha.md', 'Beta.md', path.join('templates', 'T.md')]) fs.utimesSync(path.join(dir, f), old, old);
   const entries = await scanVaultEntries(dir, ['templates']);
@@ -1009,25 +1010,37 @@ async function runBridgeServerSelection(tmpRoot) {
   // A note edited after the plugin's last write: the scan wins...
   const now = Date.now();
   const stale = { ...pluginGraph, generatedAt: now - 60e3 };
-  const edited = new Map([['x', { mtimeMs: now - 10e3 }]]);
-  let pick = chooseGraphSource({ cfg: { graphSource: 'auto' }, entries: edited, pluginGraph: stale }, now);
+  // Scan entries that mirror the plugin's notes on disk, all with one mtime.
+  const onDisk = mtimeMs => new Map(pluginGraph.nodes.filter(n => !n.ghost && n.path).map(n => [path.join(dir, n.path), { mtimeMs }]));
+  const edited = onDisk(now - 10e3);
+  let pick = chooseGraphSource({ cfg: { graphSource: 'auto', vaultPath: dir }, entries: edited, pluginGraph: stale }, now);
   assert(pick.source === 'scan', 'auto falls back to the scan when a note is newer than the plugin graph');
   // ...unless the plugin graph is live and the edit is seconds old (grace).
-  const justNow = new Map([['x', { mtimeMs: now - 1000 }]]);
-  pick = chooseGraphSource({ cfg: { graphSource: 'auto' }, entries: justNow, pluginGraph: stale, liveGraphSource: 'obsidian' }, now);
+  const justNow = onDisk(now - 1000);
+  pick = chooseGraphSource({ cfg: { graphSource: 'auto', vaultPath: dir }, entries: justNow, pluginGraph: stale, liveGraphSource: 'obsidian' }, now);
   assert(pick.source === 'obsidian' && pick.recheckInMs > 0, 'a live plugin graph gets a short grace period after an edit');
-  pick = chooseGraphSource({ cfg: { graphSource: 'auto' }, entries: edited, pluginGraph: { ...stale, generatedAt: now - 11e3 } }, now);
+  pick = chooseGraphSource({ cfg: { graphSource: 'auto', vaultPath: dir }, entries: edited, pluginGraph: { ...stale, generatedAt: now - 11e3 } }, now);
   assert(pick.source === 'obsidian', 'within the 2 s slack the plugin graph counts as fresh');
-  pick = chooseGraphSource({ cfg: { graphSource: 'obsidian' }, entries: edited, pluginGraph: stale }, now);
+  // A note deleted (or added) while Obsidian was closed leaves no newer mtime
+  // behind; the note sets differing is what makes the plugin graph stale.
+  const deleted = onDisk(now - 60e3);
+  deleted.delete(path.join(dir, 'Beta.md'));
+  pick = chooseGraphSource({ cfg: { graphSource: 'auto', vaultPath: dir }, entries: deleted, pluginGraph: { ...stale, generatedAt: now } }, now);
+  assert(pick.source === 'scan', 'auto falls back to the scan when a note was deleted outside Obsidian');
+  const added = onDisk(now - 60e3);
+  added.set(path.join(dir, 'New.md'), { mtimeMs: now - 60e3 });
+  pick = chooseGraphSource({ cfg: { graphSource: 'auto', vaultPath: dir }, entries: added, pluginGraph: { ...stale, generatedAt: now } }, now);
+  assert(pick.source === 'scan', 'auto falls back to the scan when the plugin is missing a note on disk');
+  pick = chooseGraphSource({ cfg: { graphSource: 'obsidian', vaultPath: dir }, entries: edited, pluginGraph: stale }, now);
   assert(pick.source === 'obsidian', "'obsidian' uses a stale plugin graph");
-  pick = chooseGraphSource({ cfg: { graphSource: 'scan' }, entries: edited, pluginGraph: { ...stale, generatedAt: now } }, now);
+  pick = chooseGraphSource({ cfg: { graphSource: 'scan', vaultPath: dir }, entries: edited, pluginGraph: { ...stale, generatedAt: now } }, now);
   assert(pick.source === 'scan', "'scan' never uses the plugin graph");
-  pick = chooseGraphSource({ cfg: { graphSource: 'obsidian' }, entries: edited, pluginGraph: null }, now);
+  pick = chooseGraphSource({ cfg: { graphSource: 'obsidian', vaultPath: dir }, entries: edited, pluginGraph: null }, now);
   assert(pick.source === 'scan', 'no plugin graph means the scan');
 
   state.cfg = { ...state.cfg, graphSource: 'scan', showUnresolvedLinks: true };
   await rebuildGraphState(state);
-  assert(state.liveGraphSource === 'scan' && !JSON.parse(state.graphJson).nodes.some(n => n.id === 'OnlyInPlugin'), "'scan' serves the scanned graph");
+  assert(state.liveGraphSource === 'scan' && !JSON.parse(state.graphJson).nodes.some(n => n.tag === 'plug'), "'scan' serves the scanned graph");
   st = JSON.parse((await runHandler(handler, 'GET', '/api/state')).body);
   assert(st.graphSource === 'scan', '/api/state reports the scan');
 
@@ -1094,12 +1107,14 @@ async function runBridgeLiveWatcher(tmpRoot) {
 
     writeJson(path.join(pdir, 'graph.json'), {
       schema: 1, generatedAt: Date.now(), source: 'obsidian',
-      nodes: [{ id: 'Alpha', path: 'Alpha.md' }, { id: 'Plugged', path: 'Plugged.md' }],
-      links: [{ source: 'Plugged', target: 'Alpha' }]
+      // Same notes as on disk (Obsidian only indexes real files); the tag marks
+      // which source is being served.
+      nodes: [{ id: 'Alpha', path: 'Alpha.md', tag: 'fromplugin' }],
+      links: []
     });
     assert(await waitFor(() => app.state.liveGraphSource === 'obsidian', 5000), 'a valid plugin graph.json is picked up by the watcher');
     const graph = await get('/graph.json');
-    assert(graph.nodes.some(n => n.id === 'Plugged') && graph.nodes.every(n => n.path === undefined), 'the plugin graph is served without paths');
+    assert(graph.nodes.some(n => n.tag === 'fromplugin') && graph.nodes.every(n => n.path === undefined), 'the plugin graph is served without paths');
     assert((await get('/api/state')).graphSource === 'obsidian', '/api/state reports obsidian');
 
     const events = [];
