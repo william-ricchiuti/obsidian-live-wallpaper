@@ -140,7 +140,9 @@ const DEFAULTS = {
   rotate: { themes: [], everyMinutes: 60 },
   maxFps: 30,
   idleFps: 5,
-  renderer: 'auto'
+  renderer: 'auto',
+  graphSource: 'auto',
+  highlightActiveNote: true
 };
 
 const ENUMS = {
@@ -154,7 +156,8 @@ const ENUMS = {
   timeOfDay: ['off', 'tint', 'palette'],
   overlay: ['none', 'clock', 'stats', 'note'],
   labelSource: ['hubs', 'recent'],
-  renderer: ['auto', 'canvas', 'webgl']
+  renderer: ['auto', 'canvas', 'webgl'],
+  graphSource: ['auto', 'scan', 'obsidian']
 };
 const FONT_STACKS = {
   sans: "-apple-system, BlinkMacSystemFont, 'Inter', sans-serif",
@@ -459,6 +462,7 @@ function normalizeConfig(data) {
     if (!finiteNumber(next[key])) next[key] = DEFAULTS[key];
   }
   next.autoTheme = next.autoTheme === true;
+  next.highlightActiveNote = next.highlightActiveNote !== false;
   next.focusNote = typeof next.focusNote === 'string' ? next.focusNote : '';
   if (typeof next.theme !== 'string' || !/^[a-z0-9-]+$/.test(next.theme)) next.theme = 'default';
   return next;
@@ -2015,6 +2019,65 @@ function getFlareIntensity(nodeId) {
 }
 
 // ---------------------------------------------------------------------------
+// Active note: the note open in Obsidian, from the bridge plugin
+// (obsidian-plugin/) via /api/active and the SSE 'active' event. It gets a
+// flare when it changes and a static ring (drawActiveRing) while it stays
+// open. The ring never animates, so it doesn't keep the idle loop awake.
+// ---------------------------------------------------------------------------
+let activeNoteId = null;
+let __activeLoaded = false;
+let __activeNodeRef = null;
+let __activeNodesFor = null; // the `nodes` array __activeNodeRef was looked up in
+function setActiveNote(id) {
+  const next = typeof id === 'string' && id ? id : null;
+  const first = !__activeLoaded;
+  __activeLoaded = true;
+  if (next === activeNoteId) return;
+  activeNoteId = next;
+  __activeNodesFor = null;
+  // No flare for the note that was already open when the page loaded.
+  if (next && !first && cfg.highlightActiveNote && !REDUCED_MOTION) flares.set(next, { start: performance.now(), duration: 1800 });
+  wake();
+}
+// The active note's node object in `nodes`, or null (not in the graph, or
+// highlightActiveNote off). Looked up once per graph load, not per frame.
+function activeNode() {
+  if (!activeNoteId || !cfg.highlightActiveNote) return null;
+  if (__activeNodesFor !== nodes) {
+    __activeNodesFor = nodes;
+    __activeNodeRef = nodes.find(n => n.id === activeNoteId && !n.ghost) || null;
+  }
+  return __activeNodeRef;
+}
+async function loadActiveNote() {
+  if (SYNTHETIC_SIZE > 0 || ONESHOT) return;
+  const data = await loadJson('/api/active');
+  if (data) setActiveNote(data.id);
+}
+// Default pipeline (canvas 2D and WebGL): a thin ring plus a soft halo
+// around the active node, drawn on the 2D canvas after the nodes.
+function drawActiveRing() {
+  const node = activeNode();
+  if (!node || !node.__hasPoint || !finiteNumber(node.__fx) || node.__renderable === false) return;
+  const r = (node.__rad || node.r || 3) + 4;
+  const dark = themeIsDark();
+  ctx.save();
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.globalAlpha = 1;
+  ctx.lineWidth = 1.25;
+  ctx.strokeStyle = dark ? 'rgba(255,255,255,0.7)' : 'rgba(20,20,30,0.6)';
+  ctx.beginPath();
+  ctx.arc(node.__fx, node.__fy, r, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = rgba(...hexToRGB(cfg.accent || '#7c5cff'), dark ? 0.28 : 0.22);
+  ctx.beginPath();
+  ctx.arc(node.__fx, node.__fy, r + 3.5, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+}
+
+// ---------------------------------------------------------------------------
 // Particles (edge flow) — time-based so speed doesn't depend on frame rate
 // ---------------------------------------------------------------------------
 let __lastParticleSpawn = 0;
@@ -2560,6 +2623,8 @@ function rebuildScene() {
       tag: n.tag || ''
     };
   });
+  const idIndex = new Map();
+  for (const n of sn) if (!n.ghost) idIndex.set(n.id, n.i);
   const sl = [];
   for (let i = 0; i < links.length; i++) {
     const a = index.get(links[i].source), b = index.get(links[i].target);
@@ -2593,7 +2658,7 @@ function rebuildScene() {
   const bfsCache = new Map();
   const plainAdj = adj.map(a => a.map(x => x[0]));
   sceneCache = {
-    nodes: sn, links: sl, hubs, recents, clusters: [],
+    nodes: sn, links: sl, hubs, recents, clusters: [], idIndex, activeIndex: -1,
     stats: vaultStats(),
     bfs(src) {
       let d = bfsCache.get(src);
@@ -2614,6 +2679,10 @@ function rebuildScene() {
 }
 
 let __clusterKey = '';
+// The scene object S handed to scene themes. Besides nodes/links/hubs/
+// recents/clusters it carries S.activeIndex: the index into S.nodes of the
+// note open in Obsidian (bridge plugin, highlightActiveNote on), or -1. A
+// theme can mark that node; it changes without a scene rebuild.
 function buildScene() {
   if (sceneDirty || !sceneCache) rebuildScene();
   const S = sceneCache;
@@ -2653,6 +2722,8 @@ function buildScene() {
   S.linkStep = Math.max(1, sceneTuning.linkStep | 0);
   S.labelCount = Math.max(0, sceneTuning.labelCount | 0);
   S.labelMinImportance = sceneTuning.labelMinImportance || 0;
+  const activeIdx = activeNoteId && cfg.highlightActiveNote ? S.idIndex.get(activeNoteId) : undefined;
+  S.activeIndex = activeIdx === undefined ? -1 : activeIdx;
   return S;
 }
 
@@ -2724,11 +2795,12 @@ function draw() {
       drawGL();
       drawParticles();
       drawAmbientParticles();
+      drawActiveRing();
     } else {
       if (hooks && hooks.drawEdges) hooks.drawEdges(); else drawEdges();
       if (hooks && hooks.drawParticles) hooks.drawParticles();
       else { drawAmbientParticles(); drawParticles(); }
-      if (hooks && hooks.drawNodes) hooks.drawNodes(); else drawNodes();
+      if (hooks && hooks.drawNodes) hooks.drawNodes(); else { drawNodes(); drawActiveRing(); }
     }
     if (hooks && hooks.drawLabels) hooks.drawLabels(); else drawLabels();
   }
@@ -2764,6 +2836,7 @@ async function pollStateVersions() {
     configStamp++;
     await loadCfg();
   }
+  await loadActiveNote();
   // The server answers again: try the push stream, but not more than once a
   // minute in case something between us and the server keeps refusing it.
   if ('EventSource' in window && performance.now() - lastSseAttemptAt > 60000) startStateSync();
@@ -2791,6 +2864,7 @@ function startStateSync() {
       if (!reconnect) return;
       if (configChanged) { configStamp++; await loadCfg(); }
       if (graphChanged) await loadGraph(); // ETag makes an unchanged graph a 304
+      await loadActiveNote();
     });
     eventSource.addEventListener('graph', async (e) => {
       try {
@@ -2798,6 +2872,9 @@ function startStateSync() {
         if (data.version) lastSeenGraphVersion = data.version;
       } catch (err) {}
       await loadGraph();
+    });
+    eventSource.addEventListener('active', (e) => {
+      try { setActiveNote(JSON.parse(e.data).id); } catch (err) {}
     });
     eventSource.addEventListener('config', async (e) => {
       try {
@@ -3049,6 +3126,7 @@ applyBackground();
     return;
   }
   if (EXPORT_MODE) { startStateSync(); wake(); exportPng(); return; }
+  await loadActiveNote();
   startStateSync();
   wake();
 })();

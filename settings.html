@@ -266,6 +266,9 @@
           <textarea id="ignorePaths" spellcheck="false" aria-describedby="ignorePaths-hint" placeholder=".obsidian&#10;templates"></textarea>
         </div>
         <div data-fields="vault"></div>
+        <div class="block">
+          <div class="hint" id="graphSourceLive" role="status">Live graph source: checking…</div>
+        </div>
       </div>
     </section>
 
@@ -395,7 +398,9 @@ const GROUPS = {
     { k: 'rotate.everyMinutes', t: 'int', label: 'Switch every (minutes)', min: 1, max: 1440, dep: c => !!(c.rotate && c.rotate.themes && c.rotate.themes.length) }
   ],
   vault: [
-    { k: 'showUnresolvedLinks', t: 'toggle', label: 'Unresolved links', hint: "Ghost nodes for [[links]] to notes that don't exist yet" }
+    { k: 'showUnresolvedLinks', t: 'toggle', label: 'Unresolved links', hint: "Ghost nodes for [[links]] to notes that don't exist yet" },
+    { k: 'graphSource', t: 'select', label: 'Graph source', hint: 'Obsidian plugin needs the Live Wallpaper Bridge plugin. Auto uses it while it is up to date.', opts: [['auto', 'Auto'], ['scan', 'Vault scan'], ['obsidian', 'Obsidian plugin']] },
+    { k: 'highlightActiveNote', t: 'toggle', label: 'Highlight open note', hint: 'Ring the note open in Obsidian (needs the bridge plugin)' }
   ],
   performance: [
     { k: 'renderer', t: 'select', label: 'Renderer', hint: 'Auto picks WebGL when available', opts: [['auto', 'Auto'], ['canvas', 'Canvas 2D'], ['webgl', 'WebGL']] },
@@ -1027,13 +1032,31 @@ function connectEvents() {
   es.addEventListener('config', async () => {
     try { setServerCfg(await getJson('/api/config')); applyForm(); } catch (e) { /* ignore */ }
   });
-  es.addEventListener('graph', () => { loadTags(); });
+  es.addEventListener('graph', () => { loadTags(); loadGraphSource(); });
+}
+
+// ---------- live graph source ----------
+async function loadGraphSource() {
+  const el = $('graphSourceLive');
+  try {
+    const st = await getJson('/api/state');
+    const live = st.graphSource === 'obsidian' ? 'Obsidian plugin' : 'vault scan';
+    let note = '';
+    if (st.graphSource !== 'obsidian') {
+      note = st.plugin && st.plugin.found
+        ? ' (plugin graph found but not used: older than the vault, or source set to scan)'
+        : ' (bridge plugin not detected)';
+    }
+    el.textContent = 'Live graph source: ' + live + note;
+  } catch (e) {
+    el.textContent = 'Live graph source: unknown';
+  }
 }
 
 buildFields();
 ['accent', 'background'].forEach(k => $(fid(k)).addEventListener('input', updateContrast));
 loadThemes();
 loadPresets();
-loadConfig().then(loadTags).then(connectEvents);
+loadConfig().then(loadTags).then(loadGraphSource).then(connectEvents);
 </script>
 </body></html>
