@@ -67,6 +67,28 @@ keeps idling at `idleFps` while paused.
 
 ## Autostart the parser (optional)
 
+The easy way: install the CLI globally, then let it register a scheduled task
+for you (run this from the folder where you want the config file to live):
+
+```powershell
+npm i -g obsidian-live-wallpaper
+olw install --vault "C:\Users\You\path\to\your\vault"
+```
+
+It writes the config, creates a Task Scheduler task `ObsidianLiveWallpaper-<id>`
+(one per config file, so several vaults can coexist) that runs at logon, starts
+it, and prints the wallpaper URL to give Lively. Task Scheduler does **not**
+restart the server if it crashes; run `schtasks /Run /TN "ObsidianLiveWallpaper-<id>"`
+or log out and back in. Check it with `schtasks /Query /TN "ObsidianLiveWallpaper-<id>" /V /FO LIST`.
+
+- `olw install --dry-run …` prints the `schtasks` commands without doing anything.
+- `olw uninstall` (add `--config <file>` if you used one) ends and deletes the task.
+- `npx obsidian-live-wallpaper install --vault …` also works, but because npx
+  runs from a temporary cache that can be cleared, it stops and asks you to
+  install globally first (`--force` overrides that).
+
+The manual options below do the same thing by hand (pm2 also restarts after a crash).
+
 ### Option A: Task Scheduler
 
 1. Open **Task Scheduler** → Create Basic Task.

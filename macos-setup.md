@@ -12,6 +12,27 @@
 
 ## Autostart the parser
 
+The easy way: install the CLI globally, then let it register a launchd agent
+for you (run this from the folder where you want the config file to live):
+
+```bash
+npm i -g obsidian-live-wallpaper
+olw install --vault /Users/YOU/path/to/your/vault
+```
+
+It writes the config, then `~/Library/LaunchAgents/com.obsidian-live-wallpaper.<id>.plist`
+(one per config file, so several vaults can coexist), loads it with `launchctl`,
+and prints the wallpaper URL to paste into Plash. The agent starts at login and
+restarts only after a crash. Logs go to `~/Library/Logs/obsidian-live-wallpaper-<id>.log`.
+
+- `olw install --dry-run …` prints the plist and the `launchctl` commands without doing anything.
+- `olw uninstall` (add `--config <file>` if you used one) stops and removes it.
+- `npx obsidian-live-wallpaper install --vault …` also works, but because npx
+  runs from a temporary cache that can be cleared, it stops and asks you to
+  install globally first (`--force` overrides that).
+
+### Manual setup (fallback)
+
 Save this as `~/Library/LaunchAgents/com.user.vaultwallpaper.plist`, edit the two paths, then run `launchctl load ~/Library/LaunchAgents/com.user.vaultwallpaper.plist`.
 
 Find your node path first: run `which node` in Terminal and paste the result below.
