@@ -519,6 +519,56 @@ async function runIgnorePathsIntegration(tmpRoot) {
     `expected only Alpha to survive ignorePaths filtering, got [${basenames.join(', ')}]`);
 }
 
+// A vault that lives under a dot-folder (~/.vaults/x) must still live-update,
+// while dot-folders *inside* the vault (.obsidian, .trash) stay ignored.
+async function runLiveWatcherDotAncestor(tmpRoot) {
+  const vaultDir = path.join(tmpRoot, '.hidden-parent', 'vault');
+  writeFile(path.join(vaultDir, 'Alpha.md'), '# Alpha\n');
+  fs.mkdirSync(path.join(vaultDir, '.obsidian'), { recursive: true });
+  const configPath = path.join(tmpRoot, 'dotparent-config.json');
+  writeJson(configPath, { vaultPath: vaultDir, port: 3997 });
+  const app = await startApp({ configPath, outPath: path.join(tmpRoot, 'dotparent-graph.json') });
+  const waitForVersion = async (above, timeoutMs) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (app.state.graphVersion > above) return true;
+      await new Promise(r => setTimeout(r, 100));
+    }
+    return false;
+  };
+  try {
+    await new Promise((resolve, reject) => {
+      app.watcher.once('ready', resolve);
+      setTimeout(() => reject(new Error('watcher never became ready')), 5000);
+    });
+    await new Promise(r => setTimeout(r, 300));
+    let before = app.state.graphVersion;
+    writeFile(path.join(vaultDir, 'Beta.md'), '# Beta\n[[Alpha]]\n');
+    assert(await waitForVersion(before, 4000), 'expected live updates for a vault under a dot-folder');
+    before = app.state.graphVersion;
+    writeFile(path.join(vaultDir, '.obsidian', 'Hidden.md'), '# Hidden\n');
+    assert(!(await waitForVersion(before, 1200)), 'expected dot-folders inside the vault to stay ignored');
+
+    // Two overlapping ignorePaths rescans run one after the other and leave
+    // exactly one live watcher behind.
+    await Promise.all([app.state.onIgnorePathsChanged(), app.state.onIgnorePathsChanged()]);
+    await new Promise((resolve, reject) => {
+      app.watcher.once('ready', resolve);
+      setTimeout(() => reject(new Error('watcher never became ready after rescans')), 5000);
+    });
+    await new Promise(r => setTimeout(r, 300));
+    before = app.state.graphVersion;
+    writeFile(path.join(vaultDir, 'Gamma.md'), '# Gamma\n');
+    assert(await waitForVersion(before, 4000), 'expected live updates to keep working after overlapping rescans');
+  } finally {
+    process.removeAllListeners('SIGINT');
+    process.removeAllListeners('SIGTERM');
+    await app.watcher.close();
+    await app.configWatcher.close();
+    await new Promise(r => app.server.close(r));
+  }
+}
+
 // Exercises the real chokidar watcher (not just applyFsEventToState): with a
 // non-empty ignorePaths, the ignore callback used to fire on the vault root
 // itself and silently disable every live update. Also covers directories with
@@ -944,6 +994,7 @@ async function main() {
     await run413BodyTooLarge(tmpRoot);
     await runIgnorePathsIntegration(tmpRoot);
     await runLiveWatcherWithIgnorePaths(tmpRoot);
+    await runLiveWatcherDotAncestor(tmpRoot);
     await runSymlinkCycleGuard(tmpRoot);
     await runEaddrinuse(tmpRoot);
     await runEaddrinuseOwnInstance(tmpRoot);

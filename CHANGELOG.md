@@ -12,6 +12,15 @@
 - **Links and tags closer to Obsidian:** links and `#tags` inside code blocks and inline code are ignored; `[text](Note.md)` markdown links count as links; tags may use any letter and digits (`#café`, `#2024-review`, but not `#2024`); frontmatter `tag:` and `tags: a, b` are read; tags are case-insensitive across the vault (the first spelling wins), so a `tagColors` key may need renaming.
 
 ### Fixed
+- **The wallpaper never went back to idling after a new note appeared.** Flares were only removed while the default theme drew nodes, so with a scene theme, WebGL, or flares disabled (large vaults, reduced motion) the loop stayed at `maxFps`. Flares now end on time.
+- **Animated themes (LED, Mycelium, Phosphor, Synapse) stuttered at the idle rate.** Their `alwaysAnimate` flag was never read; they now keep at least 15 fps (still respecting `idleFps: 0` and reduced motion). Idle frames are also no longer skipped as "early", which halved low idle rates.
+- **After a server restart the page could stop updating** until reloaded: it gave up on the event stream and then ignored version numbers lower than the ones it had seen. It now lets the browser reconnect and reloads whatever changed while it was disconnected.
+- **A note, link or tag named like a built-in object property** (`constructor`, `toString`, `__proto__`) crashed the graph build or produced bogus tag counts.
+- **Vaults inside a dot-folder** (`~/.vaults/…`, `~/.local/…`) loaded but never live-updated.
+- **Changing `ignorePaths` could leave live updates switched off** if the rescan failed, or run two watchers if two changes overlapped.
+- **A theme that failed to load stayed missing until a page reload**, and a theme that threw kept throwing every frame. Loads now retry, and a theme that fails five frames in a row is set aside for the default pipeline until the next settings change.
+- **WebGL context loss** (sleep, GPU driver resets) froze the WebGL renderer; it now falls back to Canvas2D and rebuilds when the context returns.
+- Autostart docs: the macOS launchd plist restarted a clean exit every 10 s and logged nowhere (now `KeepAlive` on failure only, with a log file); pm2 commands gain `--stop-exit-codes 0`.
 - `/graph.json`, `/api/tags`, `/api/config` and `/events` now refuse foreign `Host` headers (DNS rebinding), like the write routes already did.
 - The port-in-use message suggested `--port`, which `npm start` ignores; it now only suggests it under the CLI.
 - Docs: Lively's pause rule should stay on (the old advice was "Nothing"); KDE Plasma needs the HTML Wallpaper plugin from the KDE Store.

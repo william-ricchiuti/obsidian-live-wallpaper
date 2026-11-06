@@ -112,10 +112,12 @@ Check status with `systemctl --user status vault-wallpaper`.
 
 ```bash
 npm install -g pm2
-pm2 start parser.js --name vault-wallpaper
+pm2 start parser.js --name vault-wallpaper --stop-exit-codes 0
 pm2 save
 pm2 startup
 ```
+
+`--stop-exit-codes 0` keeps pm2 from restarting a clean exit (a second copy exits 0 when the wallpaper is already running). It is documented by pm2, but some older pm2 versions are reported to ignore it.
 
 Follow the instructions pm2 prints to complete the startup hook.
 

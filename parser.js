@@ -261,7 +261,7 @@ function sanitizeTagColors(value) {
   if (!isPlainObject(value)) {
     throw new Error('tagColors must be an object of tag -> hex color');
   }
-  const sanitized = {};
+  const sanitized = Object.create(null);
   for (const [tag, color] of Object.entries(value)) {
     if (typeof tag !== 'string' || tag.trim() === '') {
       throw new Error('tagColors keys must be non-empty strings');
@@ -440,7 +440,7 @@ function sanitizeConfigPatch(raw) {
   }
   const patch = {};
   for (const [key, value] of Object.entries(raw)) {
-    const v = VALIDATORS[key];
+    const v = Object.hasOwn(VALIDATORS, key) ? VALIDATORS[key] : null;
     if (!v) {
       throw new Error(`unknown config key: ${key}`);
     }
@@ -698,7 +698,7 @@ function materializeGraph(entries, vaultPath, options = {}) {
   const raw = Array.from(entries.values())
     .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
     .map(entry => ({ basename: entry.basename, filePath: entry.path, entry }));
-  const basenameCounts = {};
+  const basenameCounts = Object.create(null);
   for (const item of raw) {
     basenameCounts[item.basename] = (basenameCounts[item.basename] || 0) + 1;
   }
@@ -708,13 +708,13 @@ function materializeGraph(entries, vaultPath, options = {}) {
       .map(([basename]) => basename)
   );
 
-  const files = {};
-  const tags = {};
-  const allTags = {};
-  const basenameToIds = {};
+  const files = Object.create(null);
+  const tags = Object.create(null);
+  const allTags = Object.create(null);
+  const basenameToIds = Object.create(null);
   // Obsidian resolves links case-insensitively, so index lower-cased names too.
-  const lowerToIds = {};
-  const relPathToId = {};
+  const lowerToIds = Object.create(null);
+  const relPathToId = Object.create(null);
   // Obsidian treats tags case-insensitively (#Project and #project are one
   // tag). The first spelling met in path order becomes the tag's name.
   const tagSpelling = new Map();
@@ -803,7 +803,7 @@ function materializeGraph(entries, vaultPath, options = {}) {
     }
   }
 
-  const discoveredTags = {};
+  const discoveredTags = Object.create(null);
   for (const list of Object.values(allTags)) {
     for (const tag of list) discoveredTags[tag] = (discoveredTags[tag] || 0) + 1;
   }
@@ -1087,7 +1087,7 @@ function sanitizeLayout(raw) {
   if (typeof raw.layout !== 'string' || !LAYOUTS.has(raw.layout)) throw new Error('layout.layout must be a known layout');
   const width = Number(raw.width), height = Number(raw.height);
   if (!(width > 0 && width < 1e5 && height > 0 && height < 1e5)) throw new Error('layout width/height out of range');
-  const positions = {};
+  const positions = Object.create(null);
   let count = 0;
   for (const [id, p] of Object.entries(raw.positions)) {
     if (!Array.isArray(p) || p.length !== 2) continue;
@@ -1479,8 +1479,16 @@ async function startApp(options = {}) {
     // Skip dotfiles/dot-directories, and any *file* whose extension is not .md.
     // The extension check must not fire on directories (e.g. "notes.v2"), or
     // chokidar silently never descends into them while the scan still does.
+    const vaultRootAbs = path.resolve(state.cfg.vaultPath);
     const chokidarIgnores = [
-      /(^|[/\\])\./,
+      // Hidden segments *inside* the vault only. chokidar passes absolute
+      // paths, so a plain /(^|[/\\])\./ test would ignore the whole vault
+      // whenever it lives under a dot-folder (~/.vaults, ~/.local/...).
+      filePath => {
+        const rel = path.relative(vaultRootAbs, path.resolve(filePath));
+        if (!rel || rel === '..' || rel.startsWith('..' + path.sep)) return false;
+        return rel.split(path.sep).some(part => part.startsWith('.'));
+      },
       (filePath, stats) => {
         // chokidar calls this once without stats and again with them; only
         // decide when we know it is a file (applyFsEventToState filters .md anyway).
@@ -1514,12 +1522,24 @@ async function startApp(options = {}) {
     return w;
   }
   let watcher = createVaultWatcher();
-  state.onIgnorePathsChanged = async () => {
+  // Rescans run one at a time (a settings POST and a hand edit of config.json
+  // can both trigger one), and the watcher is always recreated even if the
+  // rescan fails, so live updates can never be left switched off.
+  let rescanChain = Promise.resolve();
+  const rescanForIgnorePaths = async () => {
     try { await watcher.close(); } catch (_) {}
-    state.entries = await scanVaultEntries(state.cfg.vaultPath, state.cfg.ignorePaths);
-    await rebuild();
-    watcher = createVaultWatcher();
-    console.log('ignorePaths changed: vault rescanned');
+    try {
+      state.entries = await scanVaultEntries(state.cfg.vaultPath, state.cfg.ignorePaths);
+      await rebuild();
+      console.log('ignorePaths changed: vault rescanned');
+    } finally {
+      watcher = createVaultWatcher();
+    }
+  };
+  state.onIgnorePathsChanged = () => {
+    const run = rescanChain.then(rescanForIgnorePaths);
+    rescanChain = run.catch(e => console.error(`rescan failed: ${e.message}`));
+    return run;
   };
 
   server.listen(state.cfg.port, '127.0.0.1', () => {

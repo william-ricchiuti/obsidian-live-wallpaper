@@ -28,9 +28,18 @@ Find your node path first: run `which node` in Terminal and paste the result bel
   </array>
   <key>WorkingDirectory</key><string>/Users/YOU/path/to/obsidian-live-wallpaper</string>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
+  <!-- Restart only after a crash. A clean exit (for example "already running"
+       when another copy holds the port) must not be restarted, or launchd
+       relaunches it every 10 seconds forever. -->
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>StandardOutPath</key><string>/Users/YOU/Library/Logs/obsidian-live-wallpaper.log</string>
+  <key>StandardErrorPath</key><string>/Users/YOU/Library/Logs/obsidian-live-wallpaper.log</string>
 </dict></plist>
 ```
+
+The server's output (startup lines, `graph: … nodes` after each edit, errors)
+goes to `~/Library/Logs/obsidian-live-wallpaper.log`; open it in Console.app
+or run `tail -f ~/Library/Logs/obsidian-live-wallpaper.log`.
 
 **Common node paths:**
 - Apple Silicon (M1/M2/M3/M4): `/opt/homebrew/bin/node`

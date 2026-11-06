@@ -161,6 +161,11 @@ const FONT_STACKS = {
 };
 // labelFont is the font control. (labelStyle.fontStyle used to override it,
 // which made the settings dropdown do nothing after any preset was applied.)
+// Note ids, tags and folders come from the vault, so a lookup in a plain
+// object must not pick up inherited properties (a tag named "constructor").
+function ownValue(obj, key) {
+  return obj && Object.prototype.hasOwnProperty.call(obj, key) ? obj[key] : null;
+}
 function labelFontStack() { return FONT_STACKS[cfg.labelFont] || FONT_STACKS.sans; }
 // Deterministic per-folder colour for nodeColorMode 'folder' without a palette.
 const FOLDER_COLOR_CACHE = new Map();
@@ -494,20 +499,46 @@ function isBigVisualChange(prev, next) {
 // Themes
 // ---------------------------------------------------------------------------
 const themeLoads = new Map();
+const themeLoadAttempts = new Map();
+const THEME_LOAD_MAX_ATTEMPTS = 5;
+// A failed load (server restarting, a script that throws while registering)
+// is forgotten so the next call retries, up to a few attempts per theme.
+// Until then the wallpaper falls back to the default pipeline.
 function ensureTheme(id) {
   if (!id || id === 'default' || (window.THEMES && THEMES[id])) return Promise.resolve();
   if (themeLoads.has(id)) return themeLoads.get(id);
+  const attempts = (themeLoadAttempts.get(id) || 0) + 1;
+  if (attempts > THEME_LOAD_MAX_ATTEMPTS) return Promise.resolve();
+  themeLoadAttempts.set(id, attempts);
   const p = new Promise(resolve => {
     const s = document.createElement('script');
-    s.src = '/themes/' + encodeURIComponent(id) + '.js';
-    s.onload = () => resolve();
-    s.onerror = () => { console.warn('theme failed to load:', id); resolve(); };
+    s.src = '/themes/' + encodeURIComponent(id) + '.js' + (attempts > 1 ? '?retry=' + attempts : '');
+    const done = () => {
+      if (window.THEMES && THEMES[id]) {
+        themeLoadAttempts.delete(id);
+        if (id === cfg.theme) { sceneDirty = true; markConfigChanged(); }
+      } else {
+        console.warn('theme failed to load:', id);
+        themeLoads.delete(id);
+        s.remove();
+      }
+      resolve();
+    };
+    s.onload = done;
+    s.onerror = done;
     document.head.appendChild(s);
   });
   themeLoads.set(id, p);
   return p;
 }
+// Themes that threw on several frames in a row are set aside (the default
+// pipeline draws instead) until the next config change, so one bug can't
+// leave the wallpaper throwing on every frame forever.
+const brokenThemes = new Set();
+const THEME_MAX_CONSECUTIVE_FAILURES = 5;
+let themeFailures = 0;
 function activeTheme() {
+  if (brokenThemes.has(cfg.theme)) return null;
   const t = window.THEMES && THEMES[cfg.theme];
   return t && t.kind !== 'default' ? t : null;
 }
@@ -936,6 +967,24 @@ function updateGLState() {
   if (!glActive && glRenderer) glRenderer.clear();
 }
 
+// GPU resets (sleep/wake, driver updates, the host restarting its GPU process)
+// lose the WebGL context, after which every GL call silently does nothing.
+// Fall back to Canvas2D straight away, and rebuild the GL renderer if the
+// browser restores the context.
+glCanvas.addEventListener('webglcontextlost', (e) => {
+  e.preventDefault(); // tells the browser we want a 'webglcontextrestored'
+  console.warn('webgl context lost; drawing with Canvas2D');
+  glRenderer = null;
+  glActive = false;
+  glCanvas.style.display = 'none';
+  markConfigChanged();
+});
+glCanvas.addEventListener('webglcontextrestored', () => {
+  glTried = false;
+  updateGLState();
+  markConfigChanged();
+});
+
 addEventListener('resize', () => {
   resize();
   grainBuiltFor = '';
@@ -1114,7 +1163,7 @@ function refreshDerivedVisuals() {
     } else if (mode === 'folder') {
       color = palette && node.folder ? palette[(folderRank.get(node.folder) || 0) % palette.length] : folderColor(node.folder);
     } else {
-      color = (node.tag && cfg.tagColors[node.tag])
+      color = (node.tag && ownValue(cfg.tagColors, node.tag))
         || (palette && node.tag ? palette[(tagRank.get(node.tag) || 0) % palette.length] : null)
         || cfg.accent;
     }
@@ -1355,6 +1404,9 @@ async function loadJson(pathname, options) {
 }
 
 async function loadCfg() {
+  // Any settings change gives a set-aside theme another chance.
+  brokenThemes.clear();
+  themeFailures = 0;
   const prevRefreshMs = cfg.refreshMs;
   const prevCfg = cfg;
   let raw = null;
@@ -1554,7 +1606,7 @@ function scheduleLayoutSave() {
   layoutSaveTimer = setTimeout(() => {
     layoutSaveTimer = null;
     if (simRunning) return; // restarted meanwhile; the next stop saves
-    const positions = {};
+    const positions = Object.create(null);
     for (const n of nodes) {
       if (Number.isFinite(n.x) && Number.isFinite(n.y)) positions[n.id] = [Math.round(n.x * 10) / 10, Math.round(n.y * 10) / 10];
     }
@@ -1637,7 +1689,7 @@ async function loadGraph() {
       if (cache) {
         const dx = (innerWidth - cache.width) / 2, dy = (innerHeight - cache.height) / 2;
         for (const n of nodes) {
-          const p = n.__new && cache.positions[n.id];
+          const p = n.__new && ownValue(cache.positions, n.id);
           if (!p) continue;
           n.x = p[0] + dx; n.y = p[1] + dy;
           delete n.__new;
@@ -2278,7 +2330,7 @@ function rebuildScene() {
     return {
       i, id: n.id, src: n, x: 0, y: 0, bx: 0, by: 0, r: 0,
       ci,
-      uc: (mode === 'tag' || mode === 'recency') && n.tag && cfg.tagColors[n.tag] ? cfg.tagColors[n.tag] : null,
+      uc: (mode === 'tag' || mode === 'recency') && n.tag ? ownValue(cfg.tagColors, n.tag) : null,
       dim: !!n.__dim,
       ghost: !!n.ghost,
       imp: n.importance || 0,
@@ -2464,48 +2516,68 @@ function stopStateSync() {
   }
 }
 
+// Versions restart at 1 whenever the server restarts, so any *different*
+// version means "changed", not only a higher one.
 async function pollStateVersions() {
   const state = await loadJson('/api/state');
   if (!state) return;
-  if (state.graphVersion && state.graphVersion > lastSeenGraphVersion) {
+  if (state.graphVersion && state.graphVersion !== lastSeenGraphVersion) {
     lastSeenGraphVersion = state.graphVersion;
     await loadGraph();
   }
-  if (state.configVersion && state.configVersion > lastSeenConfigVersion) {
+  if (state.configVersion && state.configVersion !== lastSeenConfigVersion) {
     lastSeenConfigVersion = state.configVersion;
+    configStamp++;
     await loadCfg();
   }
+  // The server answers again: try the push stream, but not more than once a
+  // minute in case something between us and the server keeps refusing it.
+  if ('EventSource' in window && performance.now() - lastSseAttemptAt > 60000) startStateSync();
 }
 
+let lastSseAttemptAt = -Infinity;
+let sseHelloCount = 0;
 function startStateSync() {
   stopStateSync();
   if (SYNTHETIC_SIZE > 0 || ONESHOT) return;
   if ('EventSource' in window) {
+    lastSseAttemptAt = performance.now();
     eventSource = new EventSource('/events');
-    eventSource.addEventListener('hello', (e) => {
-      try {
-        const data = JSON.parse(e.data);
-        if (data.graphVersion) lastSeenGraphVersion = data.graphVersion;
-        if (data.configVersion) lastSeenConfigVersion = data.configVersion;
-      } catch (err) {}
+    eventSource.addEventListener('hello', async (e) => {
+      let data = {};
+      try { data = JSON.parse(e.data); } catch (err) {}
+      // The first hello is the page's own boot, which already loaded both.
+      // Any later hello is a reconnect: the server may have restarted, and
+      // the vault or config may have changed while we were disconnected.
+      const reconnect = sseHelloCount++ > 0;
+      const graphChanged = data.graphVersion !== lastSeenGraphVersion;
+      const configChanged = data.configVersion !== lastSeenConfigVersion;
+      if (data.graphVersion) lastSeenGraphVersion = data.graphVersion;
+      if (data.configVersion) lastSeenConfigVersion = data.configVersion;
+      if (!reconnect) return;
+      if (configChanged) { configStamp++; await loadCfg(); }
+      if (graphChanged) await loadGraph(); // ETag makes an unchanged graph a 304
     });
     eventSource.addEventListener('graph', async (e) => {
       try {
         const data = JSON.parse(e.data);
-        if (data.version) lastSeenGraphVersion = Math.max(lastSeenGraphVersion, data.version);
+        if (data.version) lastSeenGraphVersion = data.version;
       } catch (err) {}
       await loadGraph();
     });
     eventSource.addEventListener('config', async (e) => {
       try {
         const data = JSON.parse(e.data);
-        if (data.version) lastSeenConfigVersion = Math.max(lastSeenConfigVersion, data.version);
+        if (data.version) lastSeenConfigVersion = data.version;
       } catch (err) {}
       configStamp++;
       await loadCfg();
     });
     eventSource.onerror = () => {
       if (!eventSource) return;
+      // While CONNECTING the browser is already retrying on its own (with the
+      // server's retry delay); only a CLOSED stream has given up for good.
+      if (eventSource.readyState !== EventSource.CLOSED) return;
       stopStateSync();
       stateSyncTimer = setInterval(pollStateVersions, Math.max(1000, cfg.refreshMs));
     };
@@ -2522,13 +2594,31 @@ function startStateSync() {
 //     maxFps (0 = "still": 30 fps only while something is changing)
 //   - calm: idleFps; 0 holds the last frame and stops the loop entirely
 //   - hidden: no frames; visibilitychange wakes it
+// Flares end by time. They used to be removed only inside drawNodes, which
+// never runs for scene/hooks/WebGL themes or when flares are disabled, so one
+// new note could keep the loop at maxFps until it was deleted.
+function pruneFlares(now) {
+  for (const [id, f] of flares) if (now - f.start > f.duration) flares.delete(id);
+}
+
 function isSceneCalm() {
+  const now = performance.now();
+  if (flares.size) pruneFlares(now);
   if (simRunning || flares.size > 0 || __fadeActive || framingAnimating) return false;
-  if (performance.now() - lastConfigChangeAt < 3000) return false;
+  if (now - lastConfigChangeAt < 3000) return false;
   return true;
 }
 
+// Themes whose look *is* motion (LED, Mycelium, Phosphor, Synapse) set
+// alwaysAnimate; at the plain idle rate they would stutter or freeze.
+const ANIMATED_THEME_MIN_FPS = 15;
+function themeAlwaysAnimates() {
+  const t = activeTheme();
+  return !!(t && t.alwaysAnimate) && !REDUCED_MOTION;
+}
+
 let loopScheduled = false;
+let loopViaTimer = false;
 let loopTimer = null;
 let lastFrameAt = 0;
 function wake() {
@@ -2546,7 +2636,10 @@ function targetFps() {
   const max = cfg.maxFps | 0;
   if (!calm) return max > 0 ? max : 30;
   if (max === 0) return 0;
-  return Math.min(max, cfg.idleFps | 0);
+  const idle = cfg.idleFps | 0;
+  // idleFps 0 is an explicit "hold the frame", so it wins even here.
+  if (idle > 0 && themeAlwaysAnimates()) return Math.min(max, Math.max(idle, ANIMATED_THEME_MIN_FPS));
+  return Math.min(max, idle);
 }
 
 let __lastDrawError = 0;
@@ -2558,7 +2651,12 @@ function frameLoop(now) {
   const dt = lastFrameAt ? Math.min(250, now - lastFrameAt) : 16.67;
   // rAF runs at the display rate (often 120/144 Hz); skip frames that come
   // earlier than the cap allows, at every cap including 60.
-  if (fps > 0 && lastFrameAt && now - lastFrameAt < 1000 / fps - 2) {
+  // Only frames chained straight off rAF need this check; a frame that came
+  // through the idle timer has already waited, and skipping it would wait a
+  // whole extra period (halving low idle rates).
+  const viaTimer = loopViaTimer;
+  loopViaTimer = false;
+  if (!viaTimer && fps > 0 && lastFrameAt && now - lastFrameAt < 1000 / fps - 2) {
     scheduleNext(fps, now);
     return;
   }
@@ -2575,11 +2673,24 @@ function frameLoop(now) {
     // keep the loop alive at a low rate so a later config change can recover.
     failed = true;
     if (now - __lastDrawError > 10000) { __lastDrawError = now; console.warn('draw failed:', e && e.message ? e.message : e); }
-    try { ctx.restore(); } catch (_) {}
+    const theme = activeTheme();
+    if (theme && ++themeFailures >= THEME_MAX_CONSECUTIVE_FAILURES) {
+      console.warn(`theme ${cfg.theme} keeps failing; drawing the default theme until the next settings change`);
+      brokenThemes.add(cfg.theme);
+      themeFailures = 0;
+      sceneDirty = true;
+    }
+    // Undo whatever the theme left behind (unbalanced save(), clip(),
+    // transforms). reset() clears all of it where supported.
+    try {
+      if (typeof ctx.reset === 'function') ctx.reset();
+      else for (let i = 0; i < 32; i++) ctx.restore();
+    } catch (_) {}
     ctx.setTransform(renderScale, 0, 0, renderScale, 0, 0);
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
   }
+  if (!failed) themeFailures = 0;
   if (PERF_ENABLED) { __perfRecord('frame', performance.now() - t0); __perfFrame(); }
   const next = targetFps();
   scheduleNext(failed ? Math.max(1, Math.min(next || 1, 2)) : next, now);
@@ -2590,7 +2701,7 @@ function scheduleNext(fps, now) {
   loopScheduled = true;
   const delay = 1000 / fps - (performance.now() - now) - 4;
   if (delay <= 8) { requestAnimationFrame(frameLoop); return; }
-  loopTimer = setTimeout(() => { loopTimer = null; requestAnimationFrame(frameLoop); }, delay);
+  loopTimer = setTimeout(() => { loopTimer = null; loopViaTimer = true; requestAnimationFrame(frameLoop); }, delay);
 }
 
 document.addEventListener('visibilitychange', () => {
@@ -2618,6 +2729,8 @@ let __lastDayKey = dayKey();
 setInterval(() => {
   if (ONESHOT || SYNTHETIC_SIZE > 0) return;
   reapplyEffectiveConfig(false);
+  // Retry a theme whose script failed to load (e.g. the server was restarting).
+  if (cfg.theme && cfg.theme !== 'default' && !(window.THEMES && THEMES[cfg.theme])) ensureTheme(cfg.theme);
   // focusNote 'today' (and recency colours) depend on the date.
   const today = dayKey();
   if (today !== __lastDayKey) {

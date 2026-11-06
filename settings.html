@@ -871,7 +871,7 @@ function renderTags() {
     // Same set of rows: update in place so keyboard focus is kept.
     sorted.forEach(([tag, count]) => {
       const inp = findTagEl('tag-color', tag);
-      if (inp && inp !== document.activeElement) inp.value = tc[tag] || cfg.accent || '#7c5cff';
+      if (inp && inp !== document.activeElement) inp.value = (Object.hasOwn(tc, tag) && tc[tag]) || cfg.accent || '#7c5cff';
       const cnt = findTagEl('tag-count', tag);
       if (cnt) cnt.textContent = count;
     });
@@ -882,7 +882,7 @@ function renderTags() {
   tagSignature = sig;
   if (!sorted.length) { el.innerHTML = '<div class="empty">No tags found in vault.</div>'; return; }
   el.innerHTML = sorted.map(([tag, count], i) => {
-    const color = tc[tag] || '';
+    const color = (Object.hasOwn(tc, tag) && tc[tag]) || '';
     const t = escapeHtml(tag);
     const id = 'tag-' + i;
     return `<div class="tag-row">

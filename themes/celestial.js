@@ -20,12 +20,12 @@
       // Nebula washes: large soft radial gradients at tag cluster centers.
       // Use cluster centroids (approx by important nodes) for nebula placement.
       if (!sceneTuning.backgroundGradientEnabled) return;
-      const drawn = {};
+      const drawn = new Set();
       for (let i = 0; i < nodes.length; i++) {
         const node = nodes[i];
         if (node.__renderable === false) continue;
-        if (!node.tag || drawn[node.tag]) continue;
-        drawn[node.tag] = true;
+        if (!node.tag || drawn.has(node.tag)) continue;
+        drawn.add(node.tag);
         const [r, g, b] = hexToRGB(nodeColor(node));
         const nx = finiteNumber(node.__fx) ? node.__fx : 0;
         const ny = finiteNumber(node.__fy) ? node.__fy : 0;
