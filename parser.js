@@ -162,8 +162,10 @@ const TAGS_STRING = /^tags?:[ \t]*([^\s[][^\r\n]*)$/m;
 // for nesting. A tag must contain at least one non-numeric character, so
 // #2024 is not a tag but #2024-review is (checked in isValidTag).
 const TAGS_INLINE = /(?:^|\s)#([\p{L}\p{N}_/-]+)/gu;
-// [text](target) markdown links. Linear: no nested quantifiers.
-const MD_LINK = /(!?)\[[^\]\r\n]*\]\(([^()\r\n]*)\)/g;
+// [text](target) markdown links. The link text excludes '[' as well as ']',
+// so a line of many '[' can't make each start rescan the rest of the line
+// (quadratic; CodeQL js/polynomial-redos). Same trick as WIKILINK above.
+const MD_LINK = /(!?)\[[^[\]\r\n]*\]\(([^()\r\n]*)\)/g;
 const URL_SCHEME = /^[a-z][a-z0-9+.-]*:/i;
 // vendor/d3.min.js is pinned by npm version and never changes without a
 // reinstall, so it's safe to cache long. worker.js/renderer-core.js are our
@@ -342,7 +344,13 @@ const CASE_INSENSITIVE_FS = process.platform === 'win32' || process.platform ===
 
 // "templates/", "\\Archive\\Old", "./drafts" -> "templates", "Archive/Old", "drafts".
 function normalizeIgnorePattern(pattern, caseInsensitive) {
-  const s = String(pattern).trim().replace(/[\\/]+/g, '/').replace(/^(\.\/)+/, '').replace(/^\/+|\/+$/g, '');
+  let s = String(pattern).trim().replace(/[\\/]+/g, '/').replace(/^(\.\/)+/, '');
+  // Trim leading/trailing '/' by index: a /\/+$/ regex is quadratic on long
+  // slash runs (CodeQL js/polynomial-redos).
+  let start = 0, end = s.length;
+  while (start < end && s[start] === '/') start++;
+  while (end > start && s[end - 1] === '/') end--;
+  s = s.slice(start, end);
   return caseInsensitive ? s.toLowerCase() : s;
 }
 
@@ -560,7 +568,13 @@ function extractTag(content) {
 function markdownLinkTarget(raw) {
   let dest = raw.trim();
   if (dest.startsWith('<')) dest = dest.slice(1, dest.indexOf('>') > 0 ? dest.indexOf('>') : undefined);
-  else dest = dest.replace(/\s+["'].*$/, ''); // drop a "title"
+  else {
+    // Drop a "title": cut at the first whitespace followed by a quote. A
+    // single-character search stays linear where /\s+["'].*$/ did not
+    // (CodeQL js/polynomial-redos).
+    const t = dest.search(/\s["']/);
+    if (t >= 0) dest = dest.slice(0, t).trimEnd();
+  }
   if (!dest || dest.startsWith('#') || URL_SCHEME.test(dest)) return null;
   try { dest = decodeURIComponent(dest); } catch (_) { /* keep it as written */ }
   dest = dest.split('#')[0].replace(/^(\.\.?\/)+/, '').trim();
