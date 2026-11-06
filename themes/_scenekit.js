@@ -23,6 +23,10 @@
 //   S.linkStep      draw every linkStep-th link (large-vault budget; 1 = all)
 //   S.labelCount    max labels to draw; S.labelMinImportance  min n.imp for a label
 //
+// Anything derived only from the layout should be cached with K.memo (keyed on
+// S.key plus a sample of positions); loops over links should go through
+// K.links(S), which applies S.linkStep.
+//
 // Themes must not depend on renderer globals; everything they need is on S.
 (function () {
   'use strict';
@@ -40,11 +44,46 @@
     HEXC.set(h, c);
     return c;
   }
-  function rgbaHex(h, a) { const c = hex(h); return `rgba(${c[0]},${c[1]},${c[2]},${a})`; }
+
+  // Two-level memo (colour → number → string) with a size cap, so per-frame
+  // colour helpers don't build a new string on every call.
+  function memo2(limit) {
+    let top = new Map(), size = 0;
+    return {
+      get(a, b) { const m = top.get(a); return m === undefined ? undefined : m.get(b); },
+      set(a, b, v) {
+        if (++size > limit) { top = new Map(); size = 1; }
+        let m = top.get(a);
+        if (!m) { m = new Map(); top.set(a, m); }
+        m.set(b, v);
+      }
+    };
+  }
+  const RGBA = memo2(8192);
+  function rgbaHex(h, a) {
+    let s = RGBA.get(h, a);
+    if (s === undefined) {
+      const c = hex(h);
+      s = `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+      RGBA.set(h, a, s);
+    }
+    return s;
+  }
+  // mix(h1, h2, t): nested maps h1 → h2 → t, no key strings on the hot path.
+  let MIX = new Map(), mixSize = 0;
   function mix(h1, h2, t) {
+    let m1 = MIX.get(h1);
+    let m2 = m1 === undefined ? undefined : m1.get(h2);
+    let r = m2 === undefined ? undefined : m2.get(t);
+    if (r !== undefined) return r;
     const a = hex(h1), b = hex(h2);
-    const m = i => Math.round(a[i] + (b[i] - a[i]) * t).toString(16).padStart(2, '0');
-    return '#' + m(0) + m(1) + m(2);
+    const ch = i => Math.round(a[i] + (b[i] - a[i]) * t).toString(16).padStart(2, '0');
+    r = '#' + ch(0) + ch(1) + ch(2);
+    if (++mixSize > 8192) { MIX = new Map(); mixSize = 1; m1 = m2 = undefined; }
+    if (!m1) { m1 = new Map(); MIX.set(h1, m1); }
+    if (!m2) { m2 = new Map(); m1.set(h2, m2); }
+    m2.set(t, r);
+    return r;
   }
   const lerp = (a, b, t) => a + (b - a) * t;
   function ago(d) {
@@ -53,18 +92,27 @@
     return Math.round(d) + 'd ago';
   }
 
+  // The user palette (S.pal) is chosen for dark backgrounds; light themes keep
+  // their own inks so notes stay legible on paper. User tag colours still win.
+  function pal(st, S) {
+    return (st.dark !== false && S.pal && S.pal.length) ? S.pal : st.pal;
+  }
   function col(st, S, n) {
     if (n.uc) return n.uc;
     if (n.ci < 0) return st.ghost;
-    const pal = (S.pal && S.pal.length) ? S.pal : st.pal;
-    return pal[n.ci % pal.length];
+    const p = pal(st, S);
+    return p[n.ci % p.length];
   }
 
+  // Glow sprites. The cap is far above any realistic colour count (palette +
+  // ghost + user tag colours), and eviction is oldest-first, so a large
+  // colour set no longer clears the cache and rebuilds sprites every frame.
   const glowCache = new Map();
+  const GLOW_MAX = 256;
   function glow(color) {
     let c = glowCache.get(color);
     if (c) return c;
-    if (glowCache.size > 96) glowCache.clear();
+    if (glowCache.size >= GLOW_MAX) glowCache.delete(glowCache.keys().next().value);
     c = document.createElement('canvas');
     c.width = c.height = 64;
     const g = c.getContext('2d');
@@ -79,59 +127,112 @@
     return c;
   }
 
-  // Strokes links grouped by colour: one path per colour.
-  function edgesBatched(ctx, S, colorFn, alpha, width, curve, filter) {
-    const groups = new Map();
-    for (const l of S.links) {
-      if (filter && !filter(l)) continue;
-      const c = colorFn(l);
-      let g = groups.get(c);
-      if (!g) { g = []; groups.set(c, g); }
-      g.push(l);
+  // Layout fingerprint: S.key plus a sample of current positions, so caches
+  // also refresh while the layout is still settling between framing epochs.
+  function layoutKey(S) {
+    const ns = S.nodes, n = ns.length;
+    const step = Math.max(1, (n / 61) | 0);
+    let h = 0;
+    for (let i = 0; i < n; i += step) {
+      const p = ns[i];
+      if (p.x === p.x && p.y === p.y) h += (p.x * 1.618 + p.y * 2.718) * (1 + (i % 7));
     }
-    ctx.lineWidth = width;
-    ctx.globalAlpha = alpha;
-    for (const [c, list] of groups) {
-      ctx.strokeStyle = c;
-      ctx.beginPath();
-      for (const l of list) {
+    return S.key + '|' + n + '|' + S.links.length + '|' + (S.linkStep || 1) + '|' + Math.round(h * 4);
+  }
+  // Named cache for anything derived from the layout. `extra` extends the key
+  // (sizes, device scale, time steps). A rebuilt scene (new node/link arrays,
+  // which carry colours and dim state) also invalidates.
+  const MEMO = new Map();
+  function memo(name, S, extra, build) {
+    const key = extra === undefined ? layoutKey(S) : layoutKey(S) + '|' + extra;
+    let m = MEMO.get(name);
+    if (!m || m.key !== key || m.nodes !== S.nodes || m.links !== S.links) {
+      m = { key, nodes: S.nodes, links: S.links, v: build() };
+      MEMO.set(name, m);
+    }
+    return m.v;
+  }
+  // The links to draw under the large-vault budget: every linkStep-th one.
+  function linkList(S) {
+    const step = S.linkStep || 1;
+    if (step <= 1) return S.links;
+    let c = linkList.c;
+    if (!c || c.src !== S.links || c.step !== step) {
+      const out = [];
+      for (let i = 0; i < S.links.length; i += step) out.push(S.links[i]);
+      c = linkList.c = { src: S.links, step, out };
+    }
+    return c.out;
+  }
+  // Device pixels per CSS pixel under the context's current transform.
+  function dpr(ctx) {
+    const m = ctx.getTransform ? ctx.getTransform() : null;
+    return m ? Math.max(0.5, Math.hypot(m.a, m.b)) : 1;
+  }
+
+  // Strokes links grouped by colour: one path per colour. With an `id` (one
+  // per call site) the grouped Path2Ds are cached per layout; colorFn and
+  // filter must then depend only on the scene, not on time.
+  function edgesBatched(ctx, S, colorFn, alpha, width, curve, filter, id) {
+    const build = () => {
+      const groups = new Map();
+      for (const l of linkList(S)) {
+        if (filter && !filter(l)) continue;
+        const c = colorFn(l);
+        let p = groups.get(c);
+        if (!p) { p = new Path2D(); groups.set(c, p); }
         const a = l.a, b = l.b;
-        ctx.moveTo(a.x, a.y);
+        p.moveTo(a.x, a.y);
         if (curve) {
           const dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy) || 1;
           const bow = Math.min(40 * S.k, len * 0.2) * (l.i & 1 ? 1 : -1);
-          ctx.quadraticCurveTo((a.x + b.x) / 2 - dy / len * bow, (a.y + b.y) / 2 + dx / len * bow, b.x, b.y);
+          p.quadraticCurveTo((a.x + b.x) / 2 - dy / len * bow, (a.y + b.y) / 2 + dx / len * bow, b.x, b.y);
         } else {
-          ctx.lineTo(b.x, b.y);
+          p.lineTo(b.x, b.y);
         }
       }
-      ctx.stroke();
+      return groups;
+    };
+    const groups = id ? memo('edges:' + id, S, curve ? 1 : 0, build) : build();
+    ctx.lineWidth = width;
+    ctx.globalAlpha = alpha;
+    for (const [c, p] of groups) {
+      ctx.strokeStyle = c;
+      ctx.stroke(p);
     }
     ctx.globalAlpha = 1;
   }
 
-  // Fills circles grouped by colour and quantised alpha.
+  // Fills circles grouped by colour and alpha quantised to eighths. Group
+  // lists are pooled across calls: no per-node key strings or Map entries.
+  const dotPool = new Map();
   function dots(ctx, list, colorFn, rFn, alphaFn) {
-    const groups = new Map();
+    if (dotPool.size > 512) dotPool.clear();
+    for (const lv of dotPool.values()) for (let j = 1; j < 9; j++) lv[j].length = 0;
     for (const n of list) {
+      let a = alphaFn ? Math.round(alphaFn(n) * 8) : 8;
+      if (!(a > 0)) continue;
+      if (a > 8) a = 8;
       const c = colorFn(n);
-      const a = alphaFn ? Math.round(alphaFn(n) * 8) / 8 : 1;
-      const key = c + '|' + a;
-      let g = groups.get(key);
-      if (!g) { g = { c, a, l: [] }; groups.set(key, g); }
-      g.l.push(n);
+      let lv = dotPool.get(c);
+      if (!lv) { lv = [null, [], [], [], [], [], [], [], []]; dotPool.set(c, lv); }
+      lv[a].push(n);
     }
-    for (const g of groups.values()) {
-      if (g.a <= 0) continue;
-      ctx.fillStyle = g.c;
-      ctx.globalAlpha = g.a;
-      ctx.beginPath();
-      for (const n of g.l) {
-        const r = rFn(n);
-        ctx.moveTo(n.x + r, n.y);
-        ctx.arc(n.x, n.y, r, 0, TAU);
+    for (const [c, lv] of dotPool) {
+      for (let j = 1; j < 9; j++) {
+        const l = lv[j];
+        if (!l.length) continue;
+        ctx.fillStyle = c;
+        ctx.globalAlpha = j / 8;
+        ctx.beginPath();
+        for (const n of l) {
+          const r = rFn(n);
+          ctx.moveTo(n.x + r, n.y);
+          ctx.arc(n.x, n.y, r, 0, TAU);
+        }
+        ctx.fill();
+        l.length = 0;
       }
-      ctx.fill();
     }
     ctx.globalAlpha = 1;
   }
@@ -164,24 +265,52 @@
     return c;
   }
 
+  const LABEL_MAX = 28;
+  function truncLabel(s) {
+    s = String(s == null ? '' : s);
+    return s.length > LABEL_MAX ? s.slice(0, LABEL_MAX - 1).trimEnd() + '…' : s;
+  }
+  // Label candidates within the budget: at most S.labelCount, and (except in
+  // 'recent' mode, as in the default pipeline) at least S.labelMinImportance.
+  function labelList(S) {
+    if (!S.o.labels || S.o.labels === 'off') return [];
+    const recent = S.o.labels === 'recent';
+    const src = (recent ? S.recents : S.hubs) || [];
+    const max = Math.min(src.length, S.labelCount == null ? src.length : S.labelCount);
+    const minImp = recent ? 0 : (S.labelMinImportance || 0);
+    const out = [];
+    for (const n of src) {
+      if (out.length >= max) break;
+      if ((n.imp || 0) < minImp) continue;
+      out.push(n);
+    }
+    return out;
+  }
+
   // Default label pass for scene themes. Styles customise it through
-  // labelFont/labelSize/labelWeight/labelColor/labelText/drawLabel.
+  // labelFont/labelSize/labelWeight/labelColor/labelUpper/labelText/drawLabel;
+  // labelText(n, S, label) gets the label already truncated to 28 characters.
   function labelPass(ctx, S, st) {
-    if (!S.o.labels || S.o.labels === 'off') return;
-    const list = S.o.labels === 'recent' ? S.recents : S.hubs;
+    const list = labelList(S);
+    if (!list.length) return;
     const fs = Math.max(9, (st.labelSize || 12) * Math.max(0.75, S.k));
     ctx.font = `${st.labelWeight || 500} ${fs}px ${st.labelFont || SANS}`;
     ctx.textBaseline = 'middle';
     ctx.textAlign = 'left';
     const placed = [];
+    const overlaps = box => placed.some(b => !(box[2] < b[0] || b[2] < box[0] || box[3] < b[1] || b[3] < box[1]));
     for (const n of list) {
-      let txt = st.labelText ? st.labelText(n, S) : n.label;
+      const base = truncLabel(n.label);
+      let txt = st.labelText ? st.labelText(n, S, base) : base;
       if (S.o.labels === 'recent') txt += (st.agoSep || '  ·  ') + ago(n.days);
+      if (st.labelUpper) txt = txt.toUpperCase();
       const w = ctx.measureText(txt).width;
-      const x = n.x + n.r + 7 * S.k, y = n.y;
+      const gap = n.r + 7 * S.k, y = n.y;
+      let x = n.x + gap;
+      if (x + w + 4 > S.W - 8) x = n.x - gap - w; // flip left instead of dropping
       const box = [x - 4, y - fs, x + w + 4, y + fs];
       if (box[2] > S.W - 8 || box[0] < 4 || box[1] < 4 || box[3] > S.H - 4) continue;
-      if (placed.some(b => !(box[2] < b[0] || b[2] < box[0] || box[3] < b[1] || b[3] < box[1]))) continue;
+      if (overlaps(box)) continue;
       placed.push(box);
       if (st.drawLabel) st.drawLabel(ctx, S, n, txt, x, y, w, fs);
       else {
@@ -193,5 +322,9 @@
     }
   }
 
-  window.SceneKit = { TAU, SANS, MONO, DISP, hex, rgbaHex, mix, lerp, ago, col, glow, edgesBatched, dots, pattern, noise, labelPass };
+  window.SceneKit = {
+    TAU, SANS, MONO, DISP, hex, rgbaHex, mix, lerp, ago, pal, col, glow,
+    layoutKey, memo, links: linkList, dpr, edgesBatched, dots, pattern, noise,
+    truncLabel, labelList, labelPass
+  };
 })();

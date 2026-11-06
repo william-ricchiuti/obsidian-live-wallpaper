@@ -3,6 +3,49 @@
 (function () {
   'use strict';
   const K = SceneKit;
+  // The hyphae sway very slowly (one cycle ≈ 2 minutes), so their paths are
+  // rebuilt in time steps this long instead of every frame.
+  const SWAY_STEP = 0.5;
+
+  // Link colour groups and recent-note pulse links depend only on the scene.
+  function groupsFor(st, S) {
+    const groups = new Map();
+    for (const l of K.links(S)) {
+      const c = l.a.ci < 0 && !l.a.uc ? st.ghost : K.mix(K.col(st, S, l.a), '#e9dcc0', 0.5);
+      let a = groups.get(c);
+      if (!a) { a = []; groups.set(c, a); }
+      a.push(l);
+    }
+    const pulses = [];
+    if (S.recents.length) {
+      const recent = new Set(S.recents);
+      for (const l of K.links(S)) {
+        const r = recent.has(l.a) ? l.a : recent.has(l.b) ? l.b : null;
+        if (!r) continue;
+        pulses.push(r, r === l.a ? l.b : l.a, l.i);
+      }
+    }
+    return { groups, pulses };
+  }
+
+  function hyphae(list, k, ts) {
+    const p = new Path2D();
+    for (const l of list) {
+      const a = l.a, b = l.b, dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy) || 1;
+      const nx = -dy / len, ny = dx / len, amp = Math.min(16 * k, len * 0.22);
+      const s1 = (l.i * 0.618) % 1;
+      // Short links need fewer segments for the same visible wiggle.
+      const segs = Math.max(3, Math.min(7, Math.round(len / (7 * k))));
+      p.moveTo(a.x, a.y);
+      for (let j = 1; j <= segs; j++) {
+        const u = j / segs;
+        const off = Math.sin(u * Math.PI) * amp * (Math.sin(u * 6.5 + s1 * 20 + ts * 0.05) * 0.7 + (s1 - 0.5));
+        p.lineTo(a.x + dx * u + nx * off, a.y + dy * u + ny * off);
+      }
+    }
+    return p;
+  }
+
   THEMES.mycelium = {
     kind: 'scene', name: 'Mycelium', dark: true, fg: '#efe4c8', ghost: '#5b5345', motion: 0.8,
     background: '#0d0b09', alwaysAnimate: true,
@@ -14,49 +57,34 @@
       g.addColorStop(1, '#080706');
       ctx.fillStyle = g;
       ctx.fillRect(0, 0, W, H);
-      const groups = new Map();
-      for (const l of S.links) {
-        const c = l.a.ci < 0 && !l.a.uc ? this.ghost : K.mix(K.col(this, S, l.a), '#e9dcc0', 0.5);
-        let a = groups.get(c);
-        if (!a) { a = []; groups.set(c, a); }
-        a.push(l);
-      }
-      const path = l => {
-        const a = l.a, b = l.b, dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy) || 1;
-        const nx = -dy / len, ny = dx / len, amp = Math.min(16 * k, len * 0.22);
-        const s1 = (l.i * 0.618) % 1;
-        ctx.moveTo(a.x, a.y);
-        for (let j = 1; j <= 7; j++) {
-          const u = j / 7;
-          const off = Math.sin(u * Math.PI) * amp * (Math.sin(u * 6.5 + s1 * 20 + t * 0.05) * 0.7 + (s1 - 0.5));
-          ctx.lineTo(a.x + dx * u + nx * off, a.y + dy * u + ny * off);
-        }
-      };
-      for (const [c, list] of groups) {
+      const sc = K.memo('mycelium', S, undefined, () => groupsFor(this, S));
+      const ts = Math.floor(t / SWAY_STEP) * SWAY_STEP;
+      const paths = K.memo('mycelium-paths', S, ts, () => {
+        const m = new Map();
+        for (const [c, list] of sc.groups) m.set(c, hyphae(list, k, ts));
+        return m;
+      });
+      for (const [c, p] of paths) {
         ctx.strokeStyle = c;
         ctx.globalAlpha = 0.12; ctx.lineWidth = 1.8 * k;
-        ctx.beginPath(); list.forEach(path); ctx.stroke();
+        ctx.stroke(p);
         ctx.globalAlpha = 0.38; ctx.lineWidth = 0.5 * k;
-        ctx.beginPath(); list.forEach(path); ctx.stroke();
+        ctx.stroke(p);
       }
       ctx.globalAlpha = 1;
       ctx.globalCompositeOperation = 'lighter';
+      const hubGlow = K.glow('#f1b45a');
       for (const n of S.hubs) {
         const s = n.r * 9;
         ctx.globalAlpha = 0.28;
-        ctx.drawImage(K.glow('#f1b45a'), n.x - s / 2, n.y - s / 2, s, s);
+        ctx.drawImage(hubGlow, n.x - s / 2, n.y - s / 2, s, s);
       }
-      if (S.recents.length) {
-        const recent = new Set(S.recents);
-        for (const l of S.links) {
-          const r = recent.has(l.a) ? l.a : recent.has(l.b) ? l.b : null;
-          if (!r) continue;
-          const o = r === l.a ? l.b : l.a;
-          const p = (t * 0.25 + l.i * 0.37) % 1;
-          ctx.globalAlpha = 0.9 * (1 - p);
-          const s = 10 * k;
-          ctx.drawImage(K.glow('#ffb347'), K.lerp(r.x, o.x, p) - s / 2, K.lerp(r.y, o.y, p) - s / 2, s, s);
-        }
+      const pulse = K.glow('#ffb347'), ps = 10 * k, pl = sc.pulses;
+      for (let i = 0; i < pl.length; i += 3) {
+        const r = pl[i], o = pl[i + 1];
+        const p = (t * 0.25 + pl[i + 2] * 0.37) % 1;
+        ctx.globalAlpha = 0.9 * (1 - p);
+        ctx.drawImage(pulse, K.lerp(r.x, o.x, p) - ps / 2, K.lerp(r.y, o.y, p) - ps / 2, ps, ps);
       }
       ctx.globalAlpha = 1;
       ctx.globalCompositeOperation = 'source-over';

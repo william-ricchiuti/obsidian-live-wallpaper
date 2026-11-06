@@ -8,12 +8,13 @@
     kind: 'scene', name: 'Survey', dark: false, fg: '#2c2620', ghost: '#3f7fc0', motion: 0,
     background: '#f2f1ea', labelFont: K.SANS, labelSize: 11, labelWeight: 500, agoSep: '  ',
     pal: ['#2c2620'],
-    labelText: n => n.label + '  ' + (n.deg * 37).toLocaleString(),
+    labelText: (n, _S, label) => label + '  ' + (n.deg * 37).toLocaleString(),
     draw(ctx, S) {
       const { W, H, k } = S;
-      let c = this._c;
-      if (!c || c.key !== S.key) {
-        const pts = S.nodes.filter(n => !n.ghost);
+      // Contours are tessellated into Path2Ds once per layout (d3.geoPath used
+      // to re-walk every ring each frame).
+      const c = K.memo('survey', S, undefined, () => {
+        const pts = S.nodes.filter(n => !n.ghost && Number.isFinite(n.bx) && Number.isFinite(n.by));
         const cs = pts.length < 3 ? [] : d3.contourDensity()
           .x(n => n.bx).y(n => n.by)
           .weight(n => 1 + n.deg * 0.6)
@@ -21,8 +22,18 @@
           .cellSize(4)
           .bandwidth(Math.max(6, 17 * k))
           .thresholds(26)(pts);
-        c = this._c = { key: S.key, cs };
-      }
+        const fills = [], minor = new Path2D(), index = new Path2D();
+        cs.forEach((cn, i) => {
+          if (i < 3) { const p = new Path2D(); d3.geoPath(null, p)(cn); fills.push(p); }
+          d3.geoPath(null, i % 5 === 4 ? index : minor)(cn);
+        });
+        const hubs = new Set(S.hubs);
+        return {
+          fills, minor, index,
+          ghosts: S.nodes.filter(n => n.ghost),
+          plain: S.nodes.filter(n => !n.ghost && !hubs.has(n))
+        };
+      });
       ctx.fillStyle = this.background;
       ctx.fillRect(0, 0, W, H);
       ctx.strokeStyle = 'rgba(120,160,200,0.35)';
@@ -32,24 +43,21 @@
       for (let x = gs / 2; x < W; x += gs) { ctx.moveTo(x, 0); ctx.lineTo(x, H); }
       for (let y = gs / 2; y < H; y += gs) { ctx.moveTo(0, y); ctx.lineTo(W, y); }
       ctx.stroke();
-      const path = d3.geoPath(null, ctx);
       ctx.fillStyle = '#dfe8cc';
       ctx.globalAlpha = 0.75;
-      for (let i = 0; i < Math.min(3, c.cs.length); i++) { ctx.beginPath(); path(c.cs[i]); ctx.fill(); }
+      for (const p of c.fills) ctx.fill(p);
       ctx.globalAlpha = 1;
-      c.cs.forEach((cn, i) => {
-        ctx.beginPath();
-        path(cn);
-        const index = i % 5 === 4;
-        ctx.strokeStyle = index ? '#8a5326' : '#b98552';
-        ctx.lineWidth = (index ? 1.3 : 0.6) * k;
-        ctx.stroke();
-      });
+      ctx.strokeStyle = '#b98552';
+      ctx.lineWidth = 0.6 * k;
+      ctx.stroke(c.minor);
+      ctx.strokeStyle = '#8a5326';
+      ctx.lineWidth = 1.3 * k;
+      ctx.stroke(c.index);
       ctx.setLineDash([3 * k, 2.4 * k]);
-      K.edgesBatched(ctx, S, () => '#2c2620', 0.42, 0.7 * k, false, l => l.tree);
+      K.edgesBatched(ctx, S, () => '#2c2620', 0.42, 0.7 * k, false, l => l.tree, 'survey');
       ctx.setLineDash([]);
-      K.dots(ctx, S.nodes.filter(n => n.ghost), () => '#3f7fc0', () => 2 * k, () => 0.85);
-      K.dots(ctx, S.nodes.filter(n => !n.ghost && !S.hubs.includes(n)), () => '#2c2620', () => 0.9 * k, n => n.dim ? 0.25 : 0.7);
+      K.dots(ctx, c.ghosts, () => '#3f7fc0', () => 2 * k, () => 0.85);
+      K.dots(ctx, c.plain, () => '#2c2620', () => 0.9 * k, n => n.dim ? 0.25 : 0.7);
       ctx.fillStyle = '#2c2620';
       for (const n of S.hubs) {
         const s = 4.5 * k;
