@@ -137,7 +137,7 @@ const DEFAULTS = {
   focusHops: 2,
   rotate: { themes: [], everyMinutes: 60 },
   maxFps: 30,
-  idleFps: 10,
+  idleFps: 5,
   renderer: 'auto'
 };
 
@@ -1431,6 +1431,7 @@ function ensureSimWorker() {
       invalidateStaticLayer();
       sceneDirty = true;
       wake();
+      scheduleLayoutSave();
     }
   };
   simWorker.onerror = (err) => {
@@ -1530,6 +1531,41 @@ function settleSynchronously(alpha) {
   invalidateStaticLayer();
 }
 
+// ---------------------------------------------------------------------------
+// Layout cache (/api/layout): settled positions survive page reloads.
+// ---------------------------------------------------------------------------
+const LAYOUT_CACHE_ENABLED = SYNTHETIC_SIZE === 0 && !ONESHOT;
+let layoutSaveTimer = null;
+// Returns the saved layout when it was made with the current layout settings,
+// otherwise null (a different layout would just be relaxed away anyway).
+async function loadLayoutCache() {
+  if (!LAYOUT_CACHE_ENABLED) return null;
+  const data = await loadJson('/api/layout');
+  if (!data || !data.positions || data.layout !== cfg.layout || !!data.clusterByTag !== !!cfg.clusterByTag) return null;
+  if (!(data.width > 0 && data.height > 0)) return null;
+  return data;
+}
+// Saves positions once the layout has come to rest. Not from the settings
+// preview, which may be showing an unsaved layout.
+function scheduleLayoutSave() {
+  if (!LAYOUT_CACHE_ENABLED || PREVIEW_MODE || EXPORT_MODE || !nodes.length) return;
+  if (!(innerWidth > 0 && innerHeight > 0)) return; // collapsed/hidden view: nothing meaningful to save
+  if (layoutSaveTimer) clearTimeout(layoutSaveTimer);
+  layoutSaveTimer = setTimeout(() => {
+    layoutSaveTimer = null;
+    if (simRunning) return; // restarted meanwhile; the next stop saves
+    const positions = {};
+    for (const n of nodes) {
+      if (Number.isFinite(n.x) && Number.isFinite(n.y)) positions[n.id] = [Math.round(n.x * 10) / 10, Math.round(n.y * 10) / 10];
+    }
+    fetch('/api/layout', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ layout: cfg.layout, clusterByTag: !!cfg.clusterByTag, width: innerWidth, height: innerHeight, positions })
+    }).catch(() => {});
+  }, 1000);
+}
+
 function topologyOf(graph) {
   // Ids, tags and links: what the layout depends on. mtime/label/folder
   // changes (e.g. editing a note's body) don't move anything.
@@ -1593,6 +1629,23 @@ async function loadGraph() {
       if (s && t) links.push({ source: s, target: t });
     }
 
+    // First load: place notes where the last settled layout left them, so a
+    // reload doesn't recompute (or reshuffle) the whole graph.
+    let cachedHits = 0;
+    if (kept === 0) {
+      const cache = await loadLayoutCache();
+      if (cache) {
+        const dx = (innerWidth - cache.width) / 2, dy = (innerHeight - cache.height) / 2;
+        for (const n of nodes) {
+          const p = n.__new && cache.positions[n.id];
+          if (!p) continue;
+          n.x = p[0] + dx; n.y = p[1] + dy;
+          delete n.__new;
+          cachedHits++;
+        }
+      }
+    }
+
     // Seed new notes next to the notes they link to (or near the centre of
     // the layout), so they appear in place instead of flying in.
     const spread = Math.min(innerWidth, innerHeight) * 0.4;
@@ -1650,10 +1703,17 @@ async function loadGraph() {
       markConfigChanged();
       return;
     }
-    if (topologyChanged) {
+    if (topologyChanged && cachedHits === nodes.length) {
+      // Every note came from the saved layout: it is already settled.
+      simRunning = false;
+      simAlpha = 0;
+      framingDirty = true;
+      invalidateStaticLayer();
+    } else if (topologyChanged) {
       // Warm restart when most notes already have positions: the layout only
       // relaxes around what changed instead of re-shuffling everything.
-      const warm = kept > 0 && kept >= nodes.length * 0.8;
+      const placed = kept + cachedHits;
+      const warm = placed > 0 && placed >= nodes.length * 0.8;
       startSimulation(warm ? 0.25 : 1);
     }
     sceneDirty = true;
@@ -2492,7 +2552,8 @@ function targetFps() {
 let __lastDrawError = 0;
 function frameLoop(now) {
   loopScheduled = false;
-  if (document.hidden && !EXPORT_MODE) return; // visibilitychange calls wake()
+  // visibilitychange / the host's resume signal call wake()
+  if ((document.hidden || hostPaused) && !EXPORT_MODE) return;
   const fps = targetFps();
   const dt = lastFrameAt ? Math.min(250, now - lastFrameAt) : 16.67;
   // rAF runs at the display rate (often 120/144 Hz); skip frames that come
@@ -2535,6 +2596,22 @@ function scheduleNext(fps, now) {
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) { lastFrameAt = 0; markConfigChanged(); }
 });
+
+// Wallpaper-host pause signals. Hosts often keep a covered or paused page
+// "visible", so document.hidden alone never fires and the loop keeps drawing
+// frames nobody sees.
+// Lively: with "--pause-event true" in the wallpaper's LivelyInfo.json
+// Arguments, Lively calls this global with '{"IsPaused": true|false}' when it
+// pauses (fullscreen app, battery, etc.). Lively only stops *rendering* on
+// pause and keeps running page JS, so without this the loop burns CPU.
+let hostPaused = false;
+window.livelyWallpaperPlaybackChanged = function (data) {
+  let paused = false;
+  try { paused = !!(typeof data === 'string' ? JSON.parse(data) : data).IsPaused; } catch (_) { return; }
+  if (paused === hostPaused) return;
+  hostPaused = paused;
+  if (!paused) { lastFrameAt = 0; markConfigChanged(); }
+};
 
 // Clock-driven changes: theme rotation and time-of-day tint/palette.
 let __lastDayKey = dayKey();

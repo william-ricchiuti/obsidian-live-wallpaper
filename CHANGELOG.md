@@ -1,5 +1,21 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **Layout cache.** When the layout settles, the renderer saves node positions to `layout.json` next to the config (`/api/layout`). A reload (host restart, wake from sleep, display change) starts from that layout instead of recomputing it, and skips the simulation entirely when every note is in the cache.
+- **Lively pause support.** The renderer stops its frame loop while Lively pauses the wallpaper, if `"--pause-event true"` is set in the wallpaper's `LivelyInfo.json` (see `windows-setup.md`).
+- **Second launches exit cleanly.** If this app is already serving the port, a new instance says so and exits 0 instead of failing.
+
+### Changed
+- **`idleFps` defaults to 5** (was 10). Configs that set `idleFps` explicitly keep their value; that includes configs copied from an older `config.example.json`, which had `10`.
+- **Links and tags closer to Obsidian:** links and `#tags` inside code blocks and inline code are ignored; `[text](Note.md)` markdown links count as links; tags may use any letter and digits (`#café`, `#2024-review`, but not `#2024`); frontmatter `tag:` and `tags: a, b` are read; tags are case-insensitive across the vault (the first spelling wins), so a `tagColors` key may need renaming.
+
+### Fixed
+- `/graph.json`, `/api/tags`, `/api/config` and `/events` now refuse foreign `Host` headers (DNS rebinding), like the write routes already did.
+- The port-in-use message suggested `--port`, which `npm start` ignores; it now only suggests it under the CLI.
+- Docs: Lively's pause rule should stay on (the old advice was "Nothing"); KDE Plasma needs the HTML Wallpaper plugin from the KDE Store.
+
 ## [1.2.0] - 2026-10-13
 
 ### Added

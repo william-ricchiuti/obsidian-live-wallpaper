@@ -36,15 +36,14 @@ Keep this terminal open (or run it as a background service — see below).
 
 ## Wallpaper host options
 
-### KDE Plasma (native support)
+### KDE Plasma (HTML wallpaper plugin)
 
-KDE Plasma can use a web page as a wallpaper with no extra software.
+Plasma does not ship a web-page wallpaper type of its own; install one from the
+KDE Store first.
 
-1. Right-click your desktop → **Configure Desktop and Wallpaper**.
-2. Set **Wallpaper Type** to **Web Page**.
-3. Paste `http://127.0.0.1:3000` as the URL.
-
-That's it — KDE handles the rest.
+1. Right-click your desktop → **Configure Desktop and Wallpaper** → **Get New Plugins…**
+2. Search for **HTML Wallpaper** (updated for Plasma 6) and install it.
+3. Set **Wallpaper Type** to **HTML Wallpaper** and paste `http://127.0.0.1:3000` as the URL.
 
 ### GNOME — Hidamari
 
@@ -125,5 +124,5 @@ Follow the instructions pm2 prints to complete the startup hook.
 - **Blank wallpaper**: check that `graph.json` exists in the project folder. If not, the parser isn't running or `vaultPath` is wrong.
 - **Browser window covers desktop icons**: make sure your wallpaper host is pinning the window below all others. With xwinwrap, the `-b` flag handles this.
 - **Nodes not updating**: edit a note in Obsidian and check the parser terminal for output like `graph: 42 nodes, 87 links`.
-- **Wayland issues**: xwinwrap doesn't work on Wayland. Use KDE's native web wallpaper, Hidamari for GNOME, or check your compositor's docs for layer-shell wallpaper support.
+- **Wayland issues**: xwinwrap doesn't work on Wayland. Use KDE's HTML Wallpaper plugin, Hidamari for GNOME, or check your compositor's docs for layer-shell wallpaper support.
 - **Performance**: if your vault is 2000+ notes, increase `refreshMs` to 10000 in `config.json`.

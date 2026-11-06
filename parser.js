@@ -85,7 +85,7 @@ const DEFAULTS = {
   rotate: { themes: [], everyMinutes: 60 },
   // Performance
   maxFps: 30,
-  idleFps: 10,
+  idleFps: 5,
   renderer: 'auto'
 };
 const PUBLIC_FILES = new Map([
@@ -147,11 +147,20 @@ const THEME_NAMES = new Set(THEME_LIST.map(t => t.id));
 const WIKILINK = /(!?)\[\[([^[\]|#]+)(?:[|#][^[\]]*)?\]\]/g;
 const NON_NOTE_EXT = /\.(png|jpe?g|gif|webp|svg|bmp|avif|heic|pdf|mp3|mp4|m4a|wav|ogg|webm|mov|canvas|excalidraw|base|csv|zip)$/i;
 const FRONTMATTER = /^---\r?\n([\s\S]*?)\r?\n---/;
-const TAGS_FLOW = /^tags:\s*\[([^\]]*)\]/m;
+// Obsidian accepts both `tags:` and `tag:`, as a [flow, list], a block list, or
+// a plain string ("a, b" or "a b").
+const TAGS_FLOW = /^tags?:[ \t]*\[([^\]\r\n]*)\]/m;
 // [ \t] rather than \s so the pattern can't backtrack across newlines
 // (CodeQL js/polynomial-redos on files with many "\n " repetitions).
-const TAGS_BLOCK = /^tags:[ \t]*\r?\n((?:[ \t]*-[ \t]+\S[^\r\n]*(?:\r?\n|$))+)/m;
-const TAGS_INLINE = /(?:^|\s)#([a-zA-Z][\w-/]*)/g;
+const TAGS_BLOCK = /^tags?:[ \t]*\r?\n((?:[ \t]*-[ \t]+\S[^\r\n]*(?:\r?\n|$))+)/m;
+const TAGS_STRING = /^tags?:[ \t]*([^\s[][^\r\n]*)$/m;
+// Obsidian tag characters: any letter or digit (not just ASCII), _, - and /
+// for nesting. A tag must contain at least one non-numeric character, so
+// #2024 is not a tag but #2024-review is (checked in isValidTag).
+const TAGS_INLINE = /(?:^|\s)#([\p{L}\p{N}_/-]+)/gu;
+// [text](target) markdown links. Linear: no nested quantifiers.
+const MD_LINK = /(!?)\[[^\]\r\n]*\]\(([^()\r\n]*)\)/g;
+const URL_SCHEME = /^[a-z][a-z0-9+.-]*:/i;
 // vendor/d3.min.js is pinned by npm version and never changes without a
 // reinstall, so it's safe to cache long. worker.js/renderer-core.js are our
 // own app code and can change on an upgrade — a much shorter TTL keeps a
@@ -166,6 +175,26 @@ const EVENT_HEADERS = {
   Connection: 'keep-alive'
 };
 const MAX_BODY_BYTES = 1e6;
+// Sent by /api/state so a second instance can tell "our server already holds
+// the port" apart from an unrelated program.
+const APP_ID = 'obsidian-live-wallpaper';
+
+// Asks whatever is listening on `port` whether it is this app. Resolves true
+// only for a JSON /api/state reply carrying APP_ID.
+function probeOwnInstance(port, timeoutMs = 1500) {
+  return new Promise(resolve => {
+    const req = http.get({ host: '127.0.0.1', port, path: '/api/state', timeout: timeoutMs }, res => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', c => { if (body.length < 4096) body += c; });
+      res.on('end', () => {
+        try { resolve(JSON.parse(body).app === APP_ID); } catch (_) { resolve(false); }
+      });
+    });
+    req.on('timeout', () => { req.destroy(); resolve(false); });
+    req.on('error', () => resolve(false));
+  });
+}
 
 function noteId(basename, filePath, vaultPath, duplicatedBasenames) {
   if (!duplicatedBasenames.has(basename)) return basename;
@@ -438,25 +467,58 @@ function writeConfigFile(nextCfg, configPath = cfgPath) {
 // All tags on a note, in order: frontmatter first, then inline #tags. The
 // first one is the note's primary tag (used for clustering and colour); the
 // rest are kept so every tag is counted and can be coloured in settings.
+function isValidTag(tag) {
+  // At least one character that isn't a digit or a nesting slash.
+  return /[^\d/]/.test(tag) && !tag.startsWith('/') && !tag.endsWith('/');
+}
+
+// Blanks out fenced code blocks (``` or ~~~, unclosed runs to the end like
+// Obsidian) and inline `code` spans, so links and #tags written inside code
+// aren't counted. A line scanner rather than one big regex, to stay linear.
+function stripCode(text) {
+  const lines = text.split('\n');
+  let fence = null; // the opening fence string while inside a block
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const m = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    if (fence) {
+      if (m && m[1][0] === fence[0] && m[1].length >= fence.length && line.trim() === m[1]) fence = null;
+      lines[i] = '';
+      continue;
+    }
+    if (m) { fence = m[1]; lines[i] = ''; continue; }
+    if (line.includes('`')) lines[i] = line.replace(/`[^`\r\n]+`/g, ' ');
+  }
+  return lines.join('\n');
+}
+
+// Splits a note into its frontmatter text and its code-free body.
+function splitNote(content) {
+  const fm = content.match(FRONTMATTER);
+  const body = fm ? content.slice(fm[0].length) : content;
+  return { frontmatter: fm ? fm[1] : '', body: stripCode(body) };
+}
+
 function extractTags(content) {
   const out = [];
   const add = t => {
     const v = String(t).trim().replace(/['"#]/g, '');
-    if (v && !out.includes(v)) out.push(v);
+    if (v && isValidTag(v) && !out.includes(v)) out.push(v);
   };
-  const fm = content.match(FRONTMATTER);
-  if (fm) {
-    const flow = fm[1].match(TAGS_FLOW);
+  const { frontmatter, body } = splitNote(content);
+  if (frontmatter) {
+    const flow = frontmatter.match(TAGS_FLOW);
     if (flow) flow[1].split(',').forEach(add);
-    const block = fm[1].match(TAGS_BLOCK);
+    const block = frontmatter.match(TAGS_BLOCK);
     if (block) {
       for (const line of block[1].split(/\r?\n/)) {
         const m = line.match(/^\s*-\s+(.+)/);
         if (m) add(m[1]);
       }
     }
+    const str = !flow && !block && frontmatter.match(TAGS_STRING);
+    if (str) str[1].split(/[,\s]+/).forEach(add);
   }
-  const body = fm ? content.slice(fm[0].length) : content;
   TAGS_INLINE.lastIndex = 0;
   let m;
   while ((m = TAGS_INLINE.exec(body)) !== null) add(m[1]);
@@ -468,17 +530,42 @@ function extractTag(content) {
   return tags.length ? tags[0] : null;
 }
 
+// Turns a markdown-link destination into a note target, or null when it points
+// at a URL, a same-note heading, or a non-note file.
+function markdownLinkTarget(raw) {
+  let dest = raw.trim();
+  if (dest.startsWith('<')) dest = dest.slice(1, dest.indexOf('>') > 0 ? dest.indexOf('>') : undefined);
+  else dest = dest.replace(/\s+["'].*$/, ''); // drop a "title"
+  if (!dest || dest.startsWith('#') || URL_SCHEME.test(dest)) return null;
+  try { dest = decodeURIComponent(dest); } catch (_) { /* keep it as written */ }
+  dest = dest.split('#')[0].replace(/^(\.\.?\/)+/, '').trim();
+  if (!dest) return null;
+  const ext = /\.([a-z0-9]{1,8})$/i.exec(dest);
+  if (ext && ext[1].toLowerCase() !== 'md') return null; // attachment
+  return dest.replace(/\.md$/i, '');
+}
+
+// Note link targets in order: [[wikilinks]] and [text](note.md) links from the
+// frontmatter and the body, skipping anything inside code.
 function extractWikilinks(content) {
   const result = [];
-  WIKILINK.lastIndex = 0;
-  let match;
-  while ((match = WIKILINK.exec(content)) !== null) {
-    let target = match[2].trim();
-    if (!target) continue;
-    if (NON_NOTE_EXT.test(target)) continue; // attachment link or embed, not a note
-    if (match[1] === '!' && /\.[a-z0-9]{1,6}$/i.test(target) && !/\.md$/i.test(target)) continue;
-    target = target.replace(/\.md$/i, '');
-    result.push(target);
+  const { frontmatter, body } = splitNote(content);
+  for (const text of frontmatter ? [frontmatter, body] : [body]) {
+    WIKILINK.lastIndex = 0;
+    let match;
+    while ((match = WIKILINK.exec(text)) !== null) {
+      let target = match[2].trim();
+      if (!target) continue;
+      if (NON_NOTE_EXT.test(target)) continue; // attachment link or embed, not a note
+      if (match[1] === '!' && /\.[a-z0-9]{1,6}$/i.test(target) && !/\.md$/i.test(target)) continue;
+      target = target.replace(/\.md$/i, '');
+      result.push(target);
+    }
+    MD_LINK.lastIndex = 0;
+    while ((match = MD_LINK.exec(text)) !== null) {
+      const target = markdownLinkTarget(match[2]);
+      if (target) result.push(target);
+    }
   }
   return result;
 }
@@ -628,6 +715,14 @@ function materializeGraph(entries, vaultPath, options = {}) {
   // Obsidian resolves links case-insensitively, so index lower-cased names too.
   const lowerToIds = {};
   const relPathToId = {};
+  // Obsidian treats tags case-insensitively (#Project and #project are one
+  // tag). The first spelling met in path order becomes the tag's name.
+  const tagSpelling = new Map();
+  const canonicalTag = t => {
+    const key = t.toLowerCase();
+    if (!tagSpelling.has(key)) tagSpelling.set(key, t);
+    return tagSpelling.get(key);
+  };
   for (const { basename, filePath, entry } of raw) {
     const id = noteId(basename, filePath, vaultPath, duplicatedBasenames);
     files[id] = {
@@ -636,7 +731,7 @@ function materializeGraph(entries, vaultPath, options = {}) {
       wikilinks: entry.wikilinks,
       mtimeMs: entry.mtimeMs
     };
-    const entryTags = entry.tags || (entry.tag ? [entry.tag] : []);
+    const entryTags = Array.from(new Set((entry.tags || (entry.tag ? [entry.tag] : [])).map(canonicalTag)));
     if (entryTags.length) { tags[id] = entryTags[0]; allTags[id] = entryTags; }
     if (!basenameToIds[basename]) basenameToIds[basename] = [];
     basenameToIds[basename].push(id);
@@ -810,7 +905,7 @@ function isTrustedHost(hostHeader) {
   return TRUSTED_HOSTS.has(hostname);
 }
 
-function readBody(req, res) {
+function readBody(req, res, maxBytes = MAX_BODY_BYTES) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let bytes = 0;
@@ -821,7 +916,7 @@ function readBody(req, res) {
       // instead and checking .length there would count UTF-16 code units, not
       // bytes — undercounting the real size of multibyte (e.g. UTF-8) input.
       bytes += chunk.length;
-      if (bytes > MAX_BODY_BYTES) {
+      if (bytes > maxBytes) {
         tooLarge = true;
         res.writeHead(413, defaultHeaders('application/json', DYNAMIC_CACHE_CONTROL));
         res.end(JSON.stringify({ error: 'request body too large' }));
@@ -968,6 +1063,74 @@ async function pickNoteOfHour(state, hourParam) {
   return { title: '', excerpt: '', folder: '', mtime: 0 };
 }
 
+// Settled node positions, saved by the renderer when the layout comes to rest
+// and served back on the next page load, so a reload (host restart, wake from
+// sleep, display change) starts from the last layout instead of recomputing
+// it. Stored as layout.json next to the config; one layout per vault.
+const MAX_LAYOUT_BYTES = 32e6; // ~35k notes is ~1-2 MB; generous headroom
+const LAYOUT_SAVE_DEBOUNCE_MS = 2000;
+function layoutPath(state) {
+  return path.join(path.dirname(state.configPath || cfgPath), 'layout.json');
+}
+function readLayoutFile(state) {
+  try {
+    const data = JSON.parse(fs.readFileSync(layoutPath(state), 'utf8'));
+    return sanitizeLayout(data);
+  } catch (_) {
+    return null;
+  }
+}
+// Accepts { layout, clusterByTag, width, height, positions: { id: [x, y] } }
+// and drops anything malformed rather than failing the whole save.
+function sanitizeLayout(raw) {
+  if (!isPlainObject(raw) || !isPlainObject(raw.positions)) throw new Error('layout must have a positions object');
+  if (typeof raw.layout !== 'string' || !LAYOUTS.has(raw.layout)) throw new Error('layout.layout must be a known layout');
+  const width = Number(raw.width), height = Number(raw.height);
+  if (!(width > 0 && width < 1e5 && height > 0 && height < 1e5)) throw new Error('layout width/height out of range');
+  const positions = {};
+  let count = 0;
+  for (const [id, p] of Object.entries(raw.positions)) {
+    if (!Array.isArray(p) || p.length !== 2) continue;
+    const x = Number(p[0]), y = Number(p[1]);
+    if (!Number.isFinite(x) || !Number.isFinite(y) || Math.abs(x) > 1e7 || Math.abs(y) > 1e7) continue;
+    positions[id] = [Math.round(x * 10) / 10, Math.round(y * 10) / 10];
+    count++;
+  }
+  return { layout: raw.layout, clusterByTag: !!raw.clusterByTag, width, height, count, savedAt: Date.now(), positions };
+}
+async function handleLayout(state, req, res) {
+  const json = (code, body) => {
+    res.writeHead(code, defaultHeaders('application/json; charset=utf-8', DYNAMIC_CACHE_CONTROL));
+    res.end(JSON.stringify(body));
+  };
+  if (!isTrustedHost(req.headers.host)) return json(403, { error: 'untrusted Host header' });
+  if (req.method === 'GET') {
+    if (state.layout === undefined) state.layout = readLayoutFile(state);
+    return json(200, state.layout || {});
+  }
+  if (req.method === 'DELETE') {
+    state.layout = null;
+    try { fs.unlinkSync(layoutPath(state)); } catch (_) {}
+    return json(200, {});
+  }
+  if (req.method !== 'POST') return json(405, { error: 'method not allowed' });
+  if (req.headers['content-type'] !== 'application/json') return json(415, { error: 'Content-Type must be application/json' });
+  try {
+    state.layout = sanitizeLayout(JSON.parse(await readBody(req, res, MAX_LAYOUT_BYTES)));
+    // Several screens (span mode) settle at the same moment; write once.
+    if (state.layoutSaveTimer) clearTimeout(state.layoutSaveTimer);
+    state.layoutSaveTimer = setTimeout(() => {
+      state.layoutSaveTimer = null;
+      try { writeConfigFile(state.layout, layoutPath(state)); }
+      catch (e) { console.error(`layout save failed: ${e.message}`); }
+    }, LAYOUT_SAVE_DEBOUNCE_MS);
+    if (state.layoutSaveTimer.unref) state.layoutSaveTimer.unref();
+    return json(200, { ok: true, count: state.layout.count });
+  } catch (e) {
+    if (!res.writableEnded) json(400, { error: e.message });
+  }
+}
+
 // Custom presets live in a sidecar file next to the config, not in browser
 // localStorage (which is per-origin, so it was lost whenever the port changed).
 function customPresetsPath(state) {
@@ -1025,6 +1188,17 @@ function createRequestHandler(state) {
       return;
     }
 
+    // DNS-rebinding guard for every route: a browser always sends Host, so a
+    // present-but-foreign Host means a page on another origin reached us via a
+    // rebound name. Reads (graph.json, tags, config) leak note names, so they
+    // get the same check as writes. Routes that return note text or change
+    // state additionally require Host to be present (checked per route).
+    if (req.headers.host !== undefined && !isTrustedHost(req.headers.host)) {
+      res.writeHead(403, defaultHeaders('application/json', DYNAMIC_CACHE_CONTROL));
+      res.end(JSON.stringify({ error: 'untrusted Host header' }));
+      return;
+    }
+
     const requestUrl = new URL(req.url, 'http://127.0.0.1');
     const url = requestUrl.pathname;
 
@@ -1044,6 +1218,7 @@ function createRequestHandler(state) {
 
     if (url === '/api/state' && req.method === 'GET') {
       serveJson(res, {
+        app: APP_ID,
         graphVersion: state.graphVersion,
         configVersion: state.configVersion
       });
@@ -1079,6 +1254,11 @@ function createRequestHandler(state) {
       // inserts it with HTML escaping.
       res.writeHead(200, defaultHeaders('application/json; charset=utf-8', DYNAMIC_CACHE_CONTROL));
       res.end(JSON.stringify(note));
+      return;
+    }
+
+    if (url === '/api/layout') {
+      await handleLayout(state, req, res);
       return;
     }
 
@@ -1347,11 +1527,20 @@ async function startApp(options = {}) {
     console.log(`settings:   http://127.0.0.1:${state.cfg.port}/settings.html`);
   });
 
-  server.on('error', e => {
+  server.on('error', async e => {
     if (e.code === 'EADDRINUSE') {
-      console.error(`Port ${state.cfg.port} is already in use. Another instance may be running, or pick a different port:`);
-      console.error(`  • edit "port" in ${path.basename(state.configPath)}, or`);
-      console.error(`  • start with a free port, e.g. --port ${state.cfg.port + 1}`);
+      const port = state.cfg.port;
+      if (await probeOwnInstance(port)) {
+        // A second launch (login item + manual start, launchd + npm start) is
+        // not an error: the wallpaper is already being served.
+        console.log(`obsidian-live-wallpaper is already running at http://127.0.0.1:${port} — nothing to do.`);
+        process.exit(0);
+      }
+      console.error(`Port ${port} is already in use by another program. Pick a different port:`);
+      console.error(`  • edit "port" in ${state.configPath}`);
+      // Only the npx/olw CLI parses --port; `npm start` reads the config file.
+      if (options.portFlag) console.error(`  • or start with a free port, e.g. ${options.portFlag} ${port + 1}`);
+      console.error('Then point your wallpaper host at the new http://127.0.0.1:<port> URL.');
     } else {
       console.error(`server error: ${e.message}`);
     }
@@ -1369,6 +1558,10 @@ async function startApp(options = {}) {
     }
     try { await watcher.close(); } catch (_) {}
     try { await configWatcher.close(); } catch (_) {}
+    if (state.layoutSaveTimer && state.layout) {
+      clearTimeout(state.layoutSaveTimer);
+      try { writeConfigFile(state.layout, layoutPath(state)); } catch (_) {}
+    }
     if (state.graphJson && state.outPath) {
       try { await writeGraphFile(state.graphJson, state.outPath); } catch (_) {}
     }

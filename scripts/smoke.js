@@ -1,4 +1,5 @@
 const fs = require('fs');
+const http = require('http');
 const net = require('net');
 const os = require('os');
 const path = require('path');
@@ -622,6 +623,37 @@ async function runEaddrinuse(tmpRoot) {
 
   assert(exitCode === 1, `expected the child process to exit(1) on EADDRINUSE, got ${exitCode}`);
   assert(/already in use/.test(stderr), `expected an "already in use" message on stderr, got: ${stderr}`);
+  // npm start doesn't parse --port, so the hint must not suggest it there.
+  assert(!/--port/.test(stderr), `expected no --port hint outside the CLI, got: ${stderr}`);
+}
+
+// A second launch while our own server holds the port exits 0 with a note,
+// instead of failing (launchd/Task Scheduler + a manual start is common).
+async function runEaddrinuseOwnInstance(tmpRoot) {
+  const fake = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ app: 'obsidian-live-wallpaper', graphVersion: 1, configVersion: 1 }));
+  });
+  const port = await new Promise(resolve => fake.listen(0, '127.0.0.1', () => resolve(fake.address().port)));
+  try {
+    const vaultDir = path.join(tmpRoot, 'eaddrinuse-own-vault');
+    writeFile(path.join(vaultDir, 'A.md'), '# A\n');
+    const configPath = path.join(tmpRoot, 'eaddrinuse-own-config.json');
+    writeJson(configPath, { vaultPath: vaultDir, port });
+    const child = spawn(process.execPath, [
+      '-e',
+      "require(process.argv[1]).startApp({ configPath: process.argv[2] }).catch(() => {});",
+      path.join(__dirname, '..', 'parser.js'),
+      configPath
+    ]);
+    let stdout = '';
+    child.stdout.on('data', chunk => { stdout += chunk; });
+    const exitCode = await new Promise(resolve => child.on('exit', resolve));
+    assert(exitCode === 0, `expected exit(0) when our own instance holds the port, got ${exitCode}`);
+    assert(/already running/.test(stdout), `expected an "already running" note, got: ${stdout}`);
+  } finally {
+    fake.close();
+  }
 }
 
 function runRendererCore() {
@@ -715,6 +747,20 @@ function runNewParserFeatures() {
   // Attachments and embeds of non-notes are not links; .md suffix is stripped.
   assert(extractWikilinks('![[photo.png]] [[scan.pdf]] ![[Other Note]] [[Note.md]]').join('|') === 'Other Note|Note',
     `expected attachments skipped and .md stripped, got ${extractWikilinks('![[photo.png]] [[scan.pdf]] ![[Other Note]] [[Note.md]]').join('|')}`);
+  // Parity with Obsidian: nothing inside code counts.
+  const code = 'real [[A]] #keep\n```\n[[InFence]] #nope\n```\n~~~js\n[[Tilde]]\n~~~\ninline `[[Inline]] #nope2` done\n';
+  assert(extractWikilinks(code).join('|') === 'A', `code links ignored, got ${extractWikilinks(code).join('|')}`);
+  assert(extractTags(code).join('|') === 'keep', `code tags ignored, got ${extractTags(code).join('|')}`);
+  assert(extractWikilinks('```\n[[Unclosed]]\nstill code').length === 0, 'an unclosed fence runs to the end');
+  // Markdown links to notes count; URLs, headings and attachments don't.
+  const md = '[a](Note%20One.md) [b](<Folder/Two.md>) [c](../Three.md#Part "t") [d](https://x.com/y.md) [e](#local) ![f](pic.png) [g](Four)';
+  assert(extractWikilinks(md).join('|') === 'Note One|Folder/Two|Three|Four', `markdown links, got ${extractWikilinks(md).join('|')}`);
+  // Tags: any letter, digits allowed if not all digits, tag:/string forms.
+  assert(extractTags('x #café #日本 #2024-review #2024 #y1984').join('|') === 'café|日本|2024-review|y1984',
+    `unicode/digit tags, got ${extractTags('x #café #日本 #2024-review #2024 #y1984').join('|')}`);
+  assert(extractTags('---\ntag: solo\n---\n').join('|') === 'solo', 'singular tag: key');
+  assert(extractTags('---\ntags: a, b c\n---\n').join('|') === 'a|b|c', `string tags, got ${extractTags('---\ntags: a, b c\n---\n').join('|')}`);
+  assert(extractTags('heading\n# Title\n').length === 0, 'a heading is not a tag');
   const ex = noteExcerpt('---\ntags: [x]\n---\n# Title\nSome **bold** text with [[Link|alias]] and [web](http://x).\n');
   assert(/Some bold text with alias and web/.test(ex), `noteExcerpt strips markdown, got: ${ex}`);
 }
@@ -732,6 +778,13 @@ async function runLinkResolution(tmpRoot) {
   assert(g.discoveredTags.idea === 2 && g.discoveredTags.project === 1, `expected every tag counted, got ${JSON.stringify(g.discoveredTags)}`);
   const alpha = g.nodes.find(n => n.id === 'Alpha');
   assert(alpha.tag === 'project' && alpha.tags.length === 2, 'expected primary tag plus full tag list');
+
+  // Tags are case-insensitive across the vault; the first spelling wins.
+  const caseDir = path.join(tmpRoot, 'tagcase-vault');
+  writeFile(path.join(caseDir, 'A.md'), '#Project\n');
+  writeFile(path.join(caseDir, 'B.md'), '#project #PROJECT\n');
+  const cg = materializeGraph(await scanVaultEntries(caseDir), caseDir, {});
+  assert(JSON.stringify(cg.discoveredTags) === JSON.stringify({ Project: 2 }), `expected one merged tag, got ${JSON.stringify(cg.discoveredTags)}`);
 }
 
 function runIndexDefaultsMatchParser() {
@@ -815,6 +868,15 @@ async function runNewRoutes(tmpRoot) {
 
   const rebinding = await runHandler(handler, 'GET', '/api/note-of-hour?hour=123', undefined, { host: 'evil.example:4321' });
   assert(rebinding.statusCode === 403, 'note-of-hour must refuse untrusted Host headers (DNS rebinding)');
+  // Reads that expose note names and tags get the same guard.
+  for (const route of ['/graph.json', '/api/tags', '/api/config', '/events']) {
+    const r = await runHandler(handler, 'GET', route, undefined, { host: 'evil.example:4321' });
+    assert(r.statusCode === 403, `${route} must refuse untrusted Host headers, got ${r.statusCode}`);
+  }
+  const okHost = await runHandler(handler, 'GET', '/api/tags', undefined, { host: 'localhost:3000' });
+  assert(okHost.statusCode === 200, `localhost Host must be accepted, got ${okHost.statusCode}`);
+  const appState = JSON.parse((await runHandler(handler, "GET", "/api/state", undefined, host)).body);
+  assert(appState.app === "obsidian-live-wallpaper", '/api/state must identify the app (used for own-instance detection)');
   const note = JSON.parse((await runHandler(handler, 'GET', '/api/note-of-hour?hour=123', undefined, host)).body);
   assert(note.title === 'Alpha' || note.title === 'Beta', `expected a note of the hour, got ${JSON.stringify(note)}`);
   assert(note.excerpt.length > 20 && !note.excerpt.includes('[['), 'expected a plain-text excerpt');
@@ -833,6 +895,23 @@ async function runNewRoutes(tmpRoot) {
   assert(bad.statusCode === 400, 'expected an invalid custom preset to be rejected');
   const del = JSON.parse((await runHandler(handler, 'DELETE', '/api/custom-presets?name=Mine', undefined, host)).body);
   assert(del.length === 0, 'expected the custom preset to be deleted');
+
+  // Layout cache: empty at first, round-trips, drops bad points, lands on disk.
+  const jsonHost = { ...host, 'content-type': 'application/json' };
+  const empty = JSON.parse((await runHandler(handler, 'GET', '/api/layout', undefined, host)).body);
+  assert(!empty.positions, 'expected no saved layout yet');
+  const savedLayout = await runHandler(handler, 'POST', '/api/layout',
+    JSON.stringify({ layout: 'force', clusterByTag: true, width: 1280, height: 800, positions: { Alpha: [10.04, -5], Beta: [1, 2], Bad: ['x', 1], Inf: [1e9, 0] } }), jsonHost);
+  assert(savedLayout.statusCode === 200 && JSON.parse(savedLayout.body).count === 2, `expected 2 valid positions saved, got ${savedLayout.body}`);
+  const got = JSON.parse((await runHandler(handler, 'GET', '/api/layout', undefined, host)).body);
+  assert(got.layout === 'force' && got.positions.Alpha[0] === 10 && !got.positions.Bad && !got.positions.Inf, `layout round-trip, got ${JSON.stringify(got)}`);
+  const badLayout = await runHandler(handler, 'POST', '/api/layout', JSON.stringify({ layout: 'nope', width: 1, height: 1, positions: {} }), jsonHost);
+  assert(badLayout.statusCode === 400, 'unknown layout name must be rejected');
+  const foreign = await runHandler(handler, 'POST', '/api/layout', JSON.stringify({ layout: 'force', width: 1, height: 1, positions: {} }), { 'content-type': 'application/json' });
+  assert(foreign.statusCode === 403, 'layout writes need a trusted Host header');
+  await new Promise(r => setTimeout(r, 2300)); // save is debounced 2 s
+  const onDisk = JSON.parse(fs.readFileSync(path.join(path.dirname(configPath), 'layout.json'), 'utf8'));
+  assert(onDisk.count === 2 && onDisk.positions.Beta[1] === 2, 'expected layout.json written next to the config');
 
   const patch = await runHandler(handler, 'POST', '/api/config', JSON.stringify({ layout: 'rings', framing: 'left', safeArea: { top: 30, bottom: 90 }, rotate: { themes: ['aurora', 'metro'], everyMinutes: 30 }, maxFps: 0, idleFps: 0 }), { ...host, 'content-type': 'application/json' });
   assert(patch.statusCode === 200, `expected the new keys to validate, got ${patch.body}`);
@@ -867,6 +946,7 @@ async function main() {
     await runLiveWatcherWithIgnorePaths(tmpRoot);
     await runSymlinkCycleGuard(tmpRoot);
     await runEaddrinuse(tmpRoot);
+    await runEaddrinuseOwnInstance(tmpRoot);
     await runLinkResolution(tmpRoot);
     await runNewRoutes(tmpRoot);
     console.log('smoke: ok');

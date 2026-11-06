@@ -46,7 +46,7 @@ Sixteen themes that each draw the graph a different way, plus new composition an
 - **`focusNote`**: shows only one note's neighbourhood. `today` means today's daily note.
 - **`rotate`**: cycles through a list of themes every N minutes.
 - **`palette`**: named palettes that work with any theme. **`tagShapes`**: a shape per tag. **`grain`** and **`vignette`**.
-- **`maxFps` / `idleFps`**: the wallpaper now idles at 10 fps by default, and `idleFps: 0` holds a still frame until something changes. It used to redraw at 60 fps forever whenever edge particles were on.
+- **`maxFps` / `idleFps`**: the wallpaper now idles at 5 fps by default, and `idleFps: 0` holds a still frame until something changes. It used to redraw at 60 fps forever whenever edge particles were on.
 - **Span across monitors**: open `/?span=1of2` and `/?span=2of2` on two screens to show one layout across both.
 - **Export PNG**: a button in settings, or open `/?export=1`.
 
@@ -100,7 +100,7 @@ You'll need [Node.js](https://nodejs.org) (v20+) and a wallpaper host app:
 
 - **macOS**: [Plash](https://apps.apple.com/us/app/plash/id1494023538) (free, Mac App Store)
 - **Windows**: [Lively Wallpaper](https://www.rocksdanister.com/lively/) (free, open source)
-- **Linux**: KDE has native support; GNOME via [Hidamari](https://github.com/jeffshee/hidamari); tiling WMs via [xwinwrap](https://github.com/ujjwal96/xwinwrap)
+- **Linux**: KDE via the HTML Wallpaper plugin from the KDE Store; GNOME via [Hidamari](https://github.com/jeffshee/hidamari); tiling WMs via [xwinwrap](https://github.com/ujjwal96/xwinwrap)
 
 **Quickest start (no clone):**
 
@@ -237,7 +237,7 @@ The renderer ships with a local vendored copy of D3, so the wallpaper still work
 | `focusHops` | `2` | How many links out from `focusNote` to show (`1`–`4`) |
 | `rotate` | `{ "themes": [], "everyMinutes": 60 }` | Cycle through these themes |
 | `maxFps` | `30` | Frame cap while something is changing; `0` = only redraw on change |
-| `idleFps` | `10` | Frame rate once the scene is settled; `0` = hold the last frame (near-zero CPU) |
+| `idleFps` | `5` | Frame rate once the scene is settled; `0` = hold the last frame (near-zero CPU) |
 | `renderer` | `"auto"` | `auto` uses WebGL2 for vaults over ~3,000 notes; force `canvas` or `webgl` |
 
 ### Tags vs links

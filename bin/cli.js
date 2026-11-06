@@ -88,7 +88,7 @@ try {
 }
 
 console.log(`config:     ${configPath}`);
-startApp({ configPath, outPath: path.join(path.dirname(configPath), 'graph.json') })
+startApp({ configPath, outPath: path.join(path.dirname(configPath), 'graph.json'), portFlag: '--port' })
   .catch(e => {
     console.error(`startup failed: ${e.message}`);
     process.exit(1);
