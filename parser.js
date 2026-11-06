@@ -86,7 +86,10 @@ const DEFAULTS = {
   // Performance
   maxFps: 30,
   idleFps: 5,
-  renderer: 'auto'
+  renderer: 'auto',
+  // Obsidian bridge plugin (obsidian-plugin/)
+  graphSource: 'auto',
+  highlightActiveNote: true
 };
 const PUBLIC_FILES = new Map([
   ['/', path.join(__dirname, 'index.html')],
@@ -115,6 +118,7 @@ const TIME_OF_DAY = new Set(['off', 'tint', 'palette']);
 const OVERLAYS = new Set(['none', 'clock', 'stats', 'note']);
 const LABEL_SOURCES = new Set(['hubs', 'recent']);
 const RENDERERS = new Set(['auto', 'canvas', 'webgl']);
+const GRAPH_SOURCES = new Set(['auto', 'scan', 'obsidian']);
 
 // Themes are discovered from themes/*.js so the validator can never drift from
 // what the renderer can load. Files starting with "_" are shared helpers, and
@@ -430,7 +434,9 @@ const VALIDATORS = {
   rotate:                 { fn: validateRotate },
   maxFps:                 { fn: validateInteger,  args: [0, 60] },
   idleFps:                { fn: validateInteger,  args: [0, 30] },
-  renderer:               { fn: validateEnum,     args: [RENDERERS] }
+  renderer:               { fn: validateEnum,     args: [RENDERERS] },
+  graphSource:            { fn: validateEnum,     args: [GRAPH_SOURCES] },
+  highlightActiveNote:    { fn: validateBoolean }
 };
 
 function sanitizePersistedConfig(raw) {
@@ -746,6 +752,7 @@ function materializeGraph(entries, vaultPath, options = {}) {
   // Obsidian resolves links case-insensitively, so index lower-cased names too.
   const lowerToIds = Object.create(null);
   const relPathToId = Object.create(null);
+  const idToRel = Object.create(null);
   // Obsidian treats tags case-insensitively (#Project and #project are one
   // tag). The first spelling met in path order becomes the tag's name.
   const tagSpelling = new Map();
@@ -769,20 +776,40 @@ function materializeGraph(entries, vaultPath, options = {}) {
     const lower = basename.toLowerCase();
     if (!lowerToIds[lower]) lowerToIds[lower] = [];
     lowerToIds[lower].push(id);
-    relPathToId[path.relative(vaultPath, filePath).replace(/\.md$/, '').replace(/\\/g, '/').toLowerCase()] = id;
+    const relNoExt = path.relative(vaultPath, filePath).replace(/\.md$/, '').replace(/\\/g, '/');
+    relPathToId[relNoExt.toLowerCase()] = id;
+    idToRel[id] = relNoExt;
   }
+  const folderOfRel = rel => (rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '');
+  // A bare [[Note]] that matches several notes links to one of them, not all:
+  // a match in the source note's folder first, then the shortest vault-relative
+  // path, then alphabetical. This approximates Obsidian's rule (its exact
+  // tie-breaking is unverified); graphSource 'obsidian'/'auto' with the bridge
+  // plugin uses Obsidian's real answer instead.
+  const pickOne = (ids, sourceId) => {
+    if (!ids || ids.length <= 1) return ids;
+    const srcFolder = folderOfRel(idToRel[sourceId] || '');
+    const sameFolder = ids.filter(id => folderOfRel(idToRel[id]) === srcFolder);
+    const pool = sameFolder.length ? sameFolder : ids;
+    const best = pool.slice().sort((a, b) => {
+      const ra = idToRel[a], rb = idToRel[b];
+      if (ra.length !== rb.length) return ra.length - rb.length;
+      return ra < rb ? -1 : ra > rb ? 1 : 0;
+    })[0];
+    return [best];
+  };
   // Resolve a [[link]] target to note ids: exact basename, then a vault-relative
   // path ([[Folder/Note]]), then the last path segment, then case-insensitively.
-  const resolveTarget = target => {
-    if (basenameToIds[target]) return basenameToIds[target];
+  const resolveTarget = (target, sourceId) => {
+    if (basenameToIds[target]) return pickOne(basenameToIds[target], sourceId);
     if (target.includes('/')) {
       const byPath = relPathToId[target.replace(/^\/+/, '').toLowerCase()];
       if (byPath) return [byPath];
       const last = target.slice(target.lastIndexOf('/') + 1);
-      if (basenameToIds[last]) return basenameToIds[last];
-      if (lowerToIds[last.toLowerCase()]) return lowerToIds[last.toLowerCase()];
+      if (basenameToIds[last]) return pickOne(basenameToIds[last], sourceId);
+      if (lowerToIds[last.toLowerCase()]) return pickOne(lowerToIds[last.toLowerCase()], sourceId);
     }
-    return lowerToIds[target.toLowerCase()] || null;
+    return pickOne(lowerToIds[target.toLowerCase()], sourceId) || null;
   };
 
   if (duplicatedBasenames.size > 0) {
@@ -809,7 +836,7 @@ function materializeGraph(entries, vaultPath, options = {}) {
   const ghostIds = new Set();
   for (const [sourceId, file] of Object.entries(files)) {
     for (const targetBasename of file.wikilinks) {
-      const targetIds = resolveTarget(targetBasename) || (nodeSet.has(targetBasename) ? [targetBasename] : []);
+      const targetIds = resolveTarget(targetBasename, sourceId) || (nodeSet.has(targetBasename) ? [targetBasename] : []);
       if (targetIds.length === 0 && showUnresolved && targetBasename.length > 0) {
         if (!ghostIds.has(targetBasename)) {
           ghostIds.add(targetBasename);
@@ -845,6 +872,218 @@ function materializeGraph(entries, vaultPath, options = {}) {
     tagged: Object.keys(tags).length,
     discoveredTags
   };
+}
+
+// ---------------------------------------------------------------------------
+// Obsidian bridge plugin (obsidian-plugin/). The plugin writes Obsidian's own
+// link/tag index to graph.json and the open note to active.json inside its
+// plugin folder. Only the default config dir (.obsidian) is checked: a vault
+// that overrides Obsidian's config folder isn't found.
+// ---------------------------------------------------------------------------
+const PLUGIN_ID = 'live-wallpaper-bridge';
+const OBSIDIAN_CONFIG_DIR = '.obsidian';
+const PLUGIN_SCHEMA = 1;
+const PLUGIN_MAX_BYTES = 64e6;
+const PLUGIN_MAX_NODES = 200000;
+const PLUGIN_MAX_LINKS = 2000000;
+const PLUGIN_MAX_ID = 1000;
+// 'auto' treats the plugin graph as fresh when it was written no earlier than
+// the newest note mtime the scan has seen, minus this slack (mtime resolution,
+// a save racing the plugin's debounce).
+const PLUGIN_FRESH_SLACK_MS = 2000;
+// While the plugin graph is live, a just-saved note is briefly newer than it;
+// the plugin rewrites ~1-2 s later. Keep the plugin graph for this long before
+// falling back to the scan, so every edit doesn't flip sources twice.
+const PLUGIN_GRACE_MS = 5000;
+
+function pluginDir(vaultPath) {
+  return path.join(vaultPath, OBSIDIAN_CONFIG_DIR, 'plugins', PLUGIN_ID);
+}
+
+const isShortString = (v, max) => typeof v === 'string' && v.length > 0 && v.length <= max;
+
+// Validates the plugin's graph.json. Throws on a wrong schema or shape; drops
+// individual malformed nodes and links rather than the whole file.
+function validatePluginGraph(raw) {
+  if (!isPlainObject(raw)) throw new Error('plugin graph must be a JSON object');
+  if (raw.schema !== PLUGIN_SCHEMA) throw new Error(`plugin graph schema must be ${PLUGIN_SCHEMA}`);
+  if (typeof raw.generatedAt !== 'number' || !Number.isFinite(raw.generatedAt) || raw.generatedAt <= 0) {
+    throw new Error('plugin graph generatedAt must be a timestamp');
+  }
+  if (!Array.isArray(raw.nodes) || !Array.isArray(raw.links)) throw new Error('plugin graph needs nodes and links arrays');
+  if (raw.nodes.length > PLUGIN_MAX_NODES) throw new Error(`plugin graph has too many nodes (max ${PLUGIN_MAX_NODES})`);
+  if (raw.links.length > PLUGIN_MAX_LINKS) throw new Error(`plugin graph has too many links (max ${PLUGIN_MAX_LINKS})`);
+  const nodes = [];
+  const ids = new Set();
+  for (const n of raw.nodes) {
+    if (!isPlainObject(n) || !isShortString(n.id, PLUGIN_MAX_ID) || ids.has(n.id)) continue;
+    const node = { id: n.id };
+    if (n.ghost === true) {
+      node.ghost = true;
+    } else {
+      if (!isShortString(n.path, 4096) || !n.path.endsWith('.md')) continue;
+      node.path = n.path;
+      if (isShortString(n.label, PLUGIN_MAX_ID)) node.label = n.label;
+      if (isShortString(n.tag, 500)) node.tag = n.tag;
+      if (Array.isArray(n.tags)) {
+        const tags = n.tags.filter(t => isShortString(t, 500)).slice(0, 200);
+        if (tags.length > 1) node.tags = tags;
+      }
+      if (typeof n.mtime === 'number' && Number.isFinite(n.mtime) && n.mtime > 0) node.mtime = n.mtime;
+      if (isShortString(n.folder, 1000)) node.folder = n.folder;
+    }
+    ids.add(n.id);
+    nodes.push(node);
+  }
+  const links = [];
+  for (const l of raw.links) {
+    if (!isPlainObject(l) || typeof l.source !== 'string' || typeof l.target !== 'string') continue;
+    if (l.source === l.target || !ids.has(l.source) || !ids.has(l.target)) continue;
+    links.push({ source: l.source, target: l.target });
+  }
+  return { generatedAt: raw.generatedAt, nodes, links };
+}
+
+// Turns a validated plugin graph into the same result shape as
+// materializeGraph: ignorePaths and showUnresolvedLinks applied, `path`
+// stripped (it is only there for ignorePaths).
+function materializePluginGraph(plugin, vaultPath, options = {}) {
+  const showUnresolved = options.showUnresolvedLinks !== undefined ? options.showUnresolvedLinks : DEFAULTS.showUnresolvedLinks;
+  const patterns = options.ignorePaths || [];
+  const kept = [];
+  const keptIds = new Set();
+  for (const n of plugin.nodes) {
+    if (n.ghost) continue;
+    if (patterns.length && isIgnoredPath(path.join(vaultPath, n.path), vaultPath, patterns)) continue;
+    const { path: _path, ...node } = n;
+    kept.push(node);
+    keptIds.add(node.id);
+  }
+  const ghostIds = new Set();
+  if (showUnresolved) for (const n of plugin.nodes) if (n.ghost) ghostIds.add(n.id);
+  const links = [];
+  const linkedGhosts = new Set();
+  for (const l of plugin.links) {
+    if (!keptIds.has(l.source)) continue; // ghosts never link out
+    if (keptIds.has(l.target)) links.push(l);
+    else if (ghostIds.has(l.target)) { links.push(l); linkedGhosts.add(l.target); }
+  }
+  // A ghost only linked from ignored notes disappears with them.
+  const nodes = kept.concat(plugin.nodes.filter(n => n.ghost && linkedGhosts.has(n.id)).map(n => ({ id: n.id, ghost: true })));
+  const discoveredTags = Object.create(null);
+  let tagged = 0;
+  for (const n of kept) {
+    const list = n.tags || (n.tag ? [n.tag] : []);
+    if (list.length) tagged++;
+    for (const t of list) discoveredTags[t] = (discoveredTags[t] || 0) + 1;
+  }
+  return { nodes, links, tagged, discoveredTags };
+}
+
+// Validates active.json: { path, id, at } with path/id strings or null.
+function validatePluginActive(raw) {
+  if (!isPlainObject(raw)) throw new Error('active note must be a JSON object');
+  const p = raw.path === null || raw.path === undefined ? null : raw.path;
+  const id = raw.id === null || raw.id === undefined ? null : raw.id;
+  if (p !== null && !isShortString(p, 4096)) throw new Error('active note path must be a string or null');
+  if (id !== null && !isShortString(id, PLUGIN_MAX_ID)) throw new Error('active note id must be a string or null');
+  const at = typeof raw.at === 'number' && Number.isFinite(raw.at) ? raw.at : 0;
+  return { path: p, id, at };
+}
+
+async function readPluginJson(filePath) {
+  const stat = await fs.promises.stat(filePath);
+  if (stat.size > PLUGIN_MAX_BYTES) throw new Error(`larger than ${PLUGIN_MAX_BYTES} bytes`);
+  return JSON.parse(await fs.promises.readFile(filePath, 'utf8'));
+}
+
+// (Re)reads the plugin's graph.json into state.pluginGraph. A missing file
+// clears it; an unreadable or invalid one (e.g. caught mid-write) keeps the
+// last good graph. Returns true when state.pluginGraph changed.
+async function loadPluginGraphFile(state) {
+  const file = path.join(pluginDir(state.cfg.vaultPath), 'graph.json');
+  // Reads can overlap (watcher events arrive faster than a big file parses);
+  // only the newest read may set the result.
+  const seq = state.pluginGraphSeq = (state.pluginGraphSeq || 0) + 1;
+  try {
+    const next = validatePluginGraph(await readPluginJson(file));
+    if (seq !== state.pluginGraphSeq) return false;
+    state.pluginGraph = next;
+    return true;
+  } catch (e) {
+    if (seq !== state.pluginGraphSeq) return false;
+    if (e.code === 'ENOENT') {
+      const had = !!state.pluginGraph;
+      state.pluginGraph = null;
+      return had;
+    }
+    console.warn(`obsidian plugin graph ignored: ${e.message}`);
+    return false;
+  }
+}
+
+// Same for active.json -> state.pluginActiveRaw. Returns true when it changed.
+async function loadPluginActiveFile(state) {
+  const file = path.join(pluginDir(state.cfg.vaultPath), 'active.json');
+  const seq = state.pluginActiveSeq = (state.pluginActiveSeq || 0) + 1;
+  try {
+    const next = validatePluginActive(await readPluginJson(file));
+    if (seq !== state.pluginActiveSeq) return false;
+    state.pluginActiveRaw = next;
+    return true;
+  } catch (e) {
+    if (seq !== state.pluginActiveSeq) return false;
+    if (e.code === 'ENOENT') {
+      const had = !!state.pluginActiveRaw;
+      state.pluginActiveRaw = null;
+      return had;
+    }
+    console.warn(`obsidian active note ignored: ${e.message}`);
+    return false;
+  }
+}
+
+// The active note as served: id dropped when its path is under ignorePaths.
+// Broadcasts an SSE 'active' event when it differs from what was last served.
+function refreshActiveNote(state) {
+  const raw = state.pluginActiveRaw;
+  let next = { id: null, path: null, at: 0 };
+  if (raw) {
+    next = { id: raw.id, path: raw.path, at: raw.at };
+    const patterns = state.cfg.ignorePaths || [];
+    if (raw.path && patterns.length && isIgnoredPath(path.join(state.cfg.vaultPath, raw.path), state.cfg.vaultPath, patterns)) next.id = null;
+  }
+  const prev = state.activeNote || { id: null, path: null, at: 0 };
+  state.activeNote = next;
+  if (prev.id !== next.id || prev.path !== next.path) {
+    broadcastEvent(state, 'active', next);
+    return true;
+  }
+  return false;
+}
+
+function newestEntryMtime(entries) {
+  let newest = 0;
+  if (entries) for (const e of entries.values()) if (e.mtimeMs > newest) newest = e.mtimeMs;
+  return newest;
+}
+
+// Which graph to serve: 'scan' never uses the plugin, 'obsidian' uses it
+// whenever a valid one exists, 'auto' only while it is fresh (see
+// PLUGIN_FRESH_SLACK_MS / PLUGIN_GRACE_MS). Edits made while Obsidian was
+// closed make the scan newer, so it wins until the plugin writes again.
+function chooseGraphSource(state, now = Date.now()) {
+  const mode = state.cfg.graphSource || DEFAULTS.graphSource;
+  const plugin = state.pluginGraph;
+  if (mode === 'scan' || !plugin) return { source: 'scan' };
+  if (mode === 'obsidian') return { source: 'obsidian' };
+  const newest = newestEntryMtime(state.entries);
+  if (plugin.generatedAt >= newest - PLUGIN_FRESH_SLACK_MS) return { source: 'obsidian' };
+  const age = now - newest;
+  if (state.liveGraphSource === 'obsidian' && age >= 0 && age < PLUGIN_GRACE_MS) {
+    return { source: 'obsidian', recheckInMs: PLUGIN_GRACE_MS - age + 50 };
+  }
+  return { source: 'scan' };
 }
 
 function serializeGraph(result) {
@@ -1032,9 +1271,32 @@ function broadcastEvent(state, event, payload) {
 // cold-start fallback and a debugging aid. It is written on the first build and
 // on shutdown, not on every edit (that used to cost a full disk write per save).
 async function rebuildGraphState(state, options = {}) {
-  const result = materializeGraph(state.entries, state.cfg.vaultPath, {
-    showUnresolvedLinks: state.cfg.showUnresolvedLinks
-  });
+  const choice = chooseGraphSource(state);
+  const result = choice.source === 'obsidian'
+    ? materializePluginGraph(state.pluginGraph, state.cfg.vaultPath, {
+      showUnresolvedLinks: state.cfg.showUnresolvedLinks,
+      ignorePaths: state.cfg.ignorePaths
+    })
+    : materializeGraph(state.entries, state.cfg.vaultPath, {
+      showUnresolvedLinks: state.cfg.showUnresolvedLinks
+    });
+  if (state.liveGraphSource && state.liveGraphSource !== choice.source) {
+    console.log(`graph source: ${choice.source === 'obsidian' ? 'Obsidian plugin' : 'vault scan'}`);
+  }
+  state.liveGraphSource = choice.source;
+  if (state.graphRecheckTimer) { clearTimeout(state.graphRecheckTimer); state.graphRecheckTimer = null; }
+  if (choice.recheckInMs) {
+    // The plugin graph is in its grace period: look again once it ends, in
+    // case the plugin never catches up (Obsidian closed right after a save).
+    state.graphRecheckTimer = setTimeout(() => {
+      state.graphRecheckTimer = null;
+      rebuildGraphState(state)
+        .then(() => broadcastEvent(state, 'graph', { version: state.graphVersion }))
+        .catch(e => console.error(`build failed: ${e.message}`));
+    }, choice.recheckInMs);
+    if (state.graphRecheckTimer.unref) state.graphRecheckTimer.unref();
+  }
+  refreshActiveNote(state);
   state.discoveredTags = result.discoveredTags;
   state.graphJson = serializeGraph(result);
   // Content hash, not the version counter: versions restart at 1 when the
@@ -1386,8 +1648,20 @@ function createRequestHandler(state) {
       serveJson(res, {
         app: APP_ID,
         graphVersion: state.graphVersion,
-        configVersion: state.configVersion
+        configVersion: state.configVersion,
+        // Which graph is live: 'obsidian' (the bridge plugin) or 'scan'.
+        graphSource: state.liveGraphSource || 'scan',
+        plugin: state.pluginGraph
+          ? { found: true, generatedAt: state.pluginGraph.generatedAt }
+          : { found: false }
       });
+      return;
+    }
+
+    // The note open in Obsidian, from the bridge plugin's active.json.
+    // { id, path, at }; id is null when nothing (or a non-note) is open.
+    if (url === '/api/active' && req.method === 'GET') {
+      serveJson(res, state.activeNote || { id: null, path: null, at: 0 });
       return;
     }
 
@@ -1469,7 +1743,7 @@ function createRequestHandler(state) {
         const ignoreChanged = JSON.stringify(updated.ignorePaths) !== JSON.stringify(prev.ignorePaths);
         if (ignoreChanged && state.onIgnorePathsChanged) {
           await state.onIgnorePathsChanged();
-        } else if (updated.showUnresolvedLinks !== prev.showUnresolvedLinks) {
+        } else if (updated.showUnresolvedLinks !== prev.showUnresolvedLinks || updated.graphSource !== prev.graphSource) {
           await rebuildGraphState(state);
           broadcastEvent(state, 'graph', { version: state.graphVersion });
         }
@@ -1580,8 +1854,12 @@ async function startApp(options = {}) {
     graphJson: '',
     graphVersion: 0,
     configVersion: 1,
-    eventClients: new Set()
+    eventClients: new Set(),
+    pluginGraph: null,
+    pluginActiveRaw: null
   };
+  await loadPluginGraphFile(state);
+  await loadPluginActiveFile(state);
 
   const server = http.createServer(createRequestHandler(state));
 
@@ -1621,7 +1899,8 @@ async function startApp(options = {}) {
     const merged = { ...next, vaultPath: state.cfg.vaultPath, port: state.cfg.port };
     const nextSafe = buildSafeConfig(merged);
     if (JSON.stringify(nextSafe) === JSON.stringify(state.safeConfig)) return; // echo of our own write / no change
-    const unresolvedChanged = merged.showUnresolvedLinks !== state.cfg.showUnresolvedLinks;
+    const unresolvedChanged = merged.showUnresolvedLinks !== state.cfg.showUnresolvedLinks
+      || merged.graphSource !== state.cfg.graphSource;
     const ignoreChanged = JSON.stringify(merged.ignorePaths) !== JSON.stringify(state.cfg.ignorePaths);
     state.cfg = merged;
     state.safeConfig = nextSafe;
@@ -1703,6 +1982,50 @@ async function startApp(options = {}) {
     return w;
   }
   let watcher = createVaultWatcher();
+
+  // The bridge plugin's files live under .obsidian, which the vault watcher
+  // skips (dot-folder), so they get their own watcher. It watches the vault
+  // root but ignores everything except the path down to the two files, so
+  // the plugin folder (or .obsidian itself) may appear later.
+  const pluginRoot = pluginDir(state.cfg.vaultPath);
+  const pluginGraphFile = path.join(pluginRoot, 'graph.json');
+  const pluginActiveFile = path.join(pluginRoot, 'active.json');
+  const pluginWatchSet = new Set([
+    path.resolve(state.cfg.vaultPath),
+    path.resolve(state.cfg.vaultPath, OBSIDIAN_CONFIG_DIR),
+    path.resolve(state.cfg.vaultPath, OBSIDIAN_CONFIG_DIR, 'plugins'),
+    path.resolve(pluginRoot),
+    path.resolve(pluginGraphFile),
+    path.resolve(pluginActiveFile)
+  ]);
+  const pluginWatcher = chokidar.watch(state.cfg.vaultPath, {
+    ignoreInitial: true,
+    depth: 4,
+    ignored: filePath => !pluginWatchSet.has(path.resolve(filePath)),
+    // adapter.write isn't atomic; wait for the write to settle. A read that
+    // still catches a partial file fails validation and keeps the last graph.
+    awaitWriteFinish: { stabilityThreshold: 150 }
+  });
+  const pluginWatcherReady = new Promise(resolve => pluginWatcher.once('ready', resolve));
+  pluginWatcher.on('all', (event, filePath) => {
+    const abs = path.resolve(filePath);
+    if (abs === path.resolve(pluginGraphFile)) {
+      loadPluginGraphFile(state).then(changed => {
+        // In scan mode the plugin graph is never used; don't rebuild for it.
+        if (changed && !(state.cfg.graphSource === 'scan' && state.liveGraphSource === 'scan')) debouncedRebuild();
+      }).catch(e => console.error(`plugin graph update failed: ${e.message}`));
+    } else if (abs === path.resolve(pluginActiveFile)) {
+      loadPluginActiveFile(state).then(changed => { if (changed) refreshActiveNote(state); })
+        .catch(e => console.error(`active note update failed: ${e.message}`));
+    } else if (event === 'unlinkDir' && (abs === path.resolve(pluginRoot) || pluginRoot.startsWith(abs + path.sep))) {
+      // Plugin folder removed (plugin uninstalled): drop both.
+      const had = !!state.pluginGraph;
+      state.pluginGraph = null;
+      state.pluginActiveRaw = null;
+      refreshActiveNote(state);
+      if (had) debouncedRebuild();
+    }
+  }).on('error', e => console.error('plugin watcher error:', e.message));
   // Rescans run one at a time (a settings POST and a hand edit of config.json
   // can both trigger one), and the watcher is always recreated even if the
   // rescan fails, so live updates can never be left switched off.
@@ -1761,6 +2084,8 @@ async function startApp(options = {}) {
     }
     try { await watcher.close(); } catch (_) {}
     try { await configWatcher.close(); } catch (_) {}
+    try { await pluginWatcher.close(); } catch (_) {}
+    if (state.graphRecheckTimer) clearTimeout(state.graphRecheckTimer);
     if (state.layoutSaveTimer && state.layout) {
       clearTimeout(state.layoutSaveTimer);
       try { writeConfigFile(state.layout, layoutPath(state)); } catch (_) {}
@@ -1777,7 +2102,7 @@ async function startApp(options = {}) {
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 
-  return { server, get watcher() { return watcher; }, configWatcher, state, rebuild };
+  return { server, get watcher() { return watcher; }, configWatcher, pluginWatcher, pluginWatcherReady, state, rebuild };
 }
 
 if (require.main === module) {
@@ -1809,6 +2134,12 @@ module.exports = {
   materializeGraph,
   applyFsEventToState,
   rebuildGraphState,
+  validatePluginGraph,
+  materializePluginGraph,
+  validatePluginActive,
+  chooseGraphSource,
+  pluginDir,
+  PLUGIN_ID,
   isIgnoredPath,
   isTrustedHost,
   isJsonContentType,

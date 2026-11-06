@@ -24,9 +24,16 @@ const {
   sanitizeCustomPresets,
   MAX_CUSTOM_PRESETS,
   startApp,
+  validatePluginGraph,
+  materializePluginGraph,
+  validatePluginActive,
+  chooseGraphSource,
+  pluginDir,
+  PLUGIN_ID,
   DEFAULTS,
   THEME_LIST
 } = require('../parser.js');
+const BridgePlugin = require('../obsidian-plugin/main.js');
 const core = require('../renderer-core.js');
 
 // A port nobody else holds right now. Fixed ports let a second copy of the app
@@ -208,9 +215,11 @@ async function runDuplicateBasenames(tmpRoot) {
   assert(betaIds.length === 2, `expected 2 Beta nodes, got ${betaIds.length}`);
   assert(betaIds.every(id => id.includes('/')), 'expected duplicate basenames to use folder/basename IDs');
 
-  // [[Beta]] in Alpha.md should link to BOTH Betas
+  // [[Beta]] in Alpha.md links to ONE Beta: the one in Alpha's own folder
+  // (the vault root), not both.
   const alphaLinks = result.links.filter(l => l.source === 'Alpha');
-  assert(alphaLinks.length === 2, `expected Alpha to link to both Betas, got ${alphaLinks.length} links`);
+  assert(alphaLinks.length === 1 && alphaLinks[0].target === './Beta',
+    `expected Alpha to link only to ./Beta, got ${JSON.stringify(alphaLinks)}`);
 
   // Both Betas link back to Alpha
   const betaToAlpha = result.links.filter(l => l.target === 'Alpha' && l.source !== 'Alpha');
@@ -582,6 +591,7 @@ async function runLiveWatcherDotAncestor(tmpRoot) {
     process.removeAllListeners('SIGTERM');
     await app.watcher.close();
     await app.configWatcher.close();
+    await app.pluginWatcher.close();
     await new Promise(r => app.server.close(r));
   }
 }
@@ -636,6 +646,7 @@ async function runLiveWatcherWithIgnorePaths(tmpRoot) {
     process.removeAllListeners('SIGTERM');
     await app.watcher.close();
     await app.configWatcher.close();
+    await app.pluginWatcher.close();
     await new Promise(r => app.server.close(r));
   }
 }
@@ -830,6 +841,304 @@ function runNewParserFeatures() {
   assert(extractTags('heading\n# Title\n').length === 0, 'a heading is not a tag');
   const ex = noteExcerpt('---\ntags: [x]\n---\n# Title\nSome **bold** text with [[Link|alias]] and [web](http://x).\n');
   assert(/Some bold text with alias and web/.test(ex), `noteExcerpt strips markdown, got: ${ex}`);
+}
+
+// A bare [[Note]] matching several notes picks one: same folder as the
+// source, then the shortest vault-relative path, then alphabetical.
+async function runDuplicateBasenameResolution(tmpRoot) {
+  const dir = path.join(tmpRoot, 'dup-resolve-vault');
+  writeFile(path.join(dir, 'nested', 'Beta.md'), '# Beta nested\n');
+  writeFile(path.join(dir, 'Beta.md'), '# Beta root\n');
+  writeFile(path.join(dir, 'nested', 'Src.md'), '[[Beta]]\n');
+  writeFile(path.join(dir, 'deep', 'er', 'Note.md'), 'x\n');
+  writeFile(path.join(dir, 'b', 'Note.md'), 'x\n');
+  writeFile(path.join(dir, 'c', 'Dup.md'), 'x\n');
+  writeFile(path.join(dir, 'd', 'Dup.md'), 'x\n');
+  writeFile(path.join(dir, 'x', 'Linker.md'), '[[Note]] [[Dup]] [[beta]]\n');
+  const g = materializeGraph(await scanVaultEntries(dir), dir, { showUnresolvedLinks: true });
+  const out = id => g.links.filter(l => l.source === id).map(l => l.target).sort();
+  assert(JSON.stringify(out('Src')) === JSON.stringify(['nested/Beta']), `same-folder match should win, got ${JSON.stringify(out('Src'))}`);
+  // Linker is in x/: no same-folder match, so the shortest path wins (b/Note
+  // over deep/er/Note, ./Beta over nested/Beta) and c/Dup beats d/Dup.
+  assert(JSON.stringify(out('Linker')) === JSON.stringify(['./Beta', 'b/Note', 'c/Dup']),
+    `expected shortest-path then alphabetical picks, got ${JSON.stringify(out('Linker'))}`);
+}
+
+// Fixture metadata shaped like Obsidian's (TFile list, resolvedLinks,
+// unresolvedLinks, getAllTags output).
+function bridgeFixture() {
+  const file = (p, mtime) => ({ path: p, basename: p.slice(p.lastIndexOf('/') + 1).replace(/\.md$/, ''), extension: 'md', stat: { mtime } });
+  const files = [file('nested/Beta.md', 3000), file('Alpha.md', 1000), file('Beta.md', 2000), file('Sub/Gamma.md', 4000)];
+  const tags = {
+    'Alpha.md': ['#Project', '#idea', '#project'],
+    'Beta.md': ['#project'],
+    'nested/Beta.md': ['#IDEA', '#extra'],
+    'Sub/Gamma.md': null
+  };
+  return {
+    files,
+    resolvedLinks: {
+      'Alpha.md': { 'Beta.md': 1, 'Sub/Gamma.md': 2, 'pic.png': 1, 'Alpha.md': 1 },
+      'nested/Beta.md': { 'Alpha.md': 1 },
+      'Sub/Gamma.md': {}
+    },
+    unresolvedLinks: {
+      'Alpha.md': { Missing: 1, 'gone.png': 1 },
+      'Beta.md': { Missing: 2, 'Other.md': 1 }
+    },
+    getTags: f => tags[f.path]
+  };
+}
+
+async function runBridgePluginBuilder(tmpRoot) {
+  assert(typeof BridgePlugin === 'function', 'plugin main.js must export the plugin class');
+  assert(typeof BridgePlugin.buildPluginGraph === 'function', 'plugin main.js must expose buildPluginGraph');
+  const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'obsidian-plugin', 'manifest.json'), 'utf8'));
+  assert(manifest.id === PLUGIN_ID, 'manifest id must match the folder the server watches');
+
+  const g = BridgePlugin.buildPluginGraph(bridgeFixture());
+  const byId = new Map(g.nodes.map(n => [n.id, n]));
+  const realIds = g.nodes.filter(n => !n.ghost).map(n => n.id);
+  assert(JSON.stringify(realIds) === JSON.stringify(['Alpha', './Beta', 'Gamma', 'nested/Beta']),
+    `expected path-ordered parser-style ids, got ${JSON.stringify(realIds)}`);
+  assert(byId.get('./Beta').label === 'Beta' && byId.get('nested/Beta').label === 'Beta' && byId.get('Alpha').label === undefined,
+    'label only when the id differs from the basename');
+  assert(byId.get('Alpha').tag === 'Project' && JSON.stringify(byId.get('Alpha').tags) === JSON.stringify(['Project', 'idea']),
+    `Alpha tags: ${JSON.stringify(byId.get('Alpha'))}`);
+  assert(byId.get('./Beta').tag === 'Project' && byId.get('./Beta').tags === undefined, 'case variants merge to the first spelling in path order');
+  assert(JSON.stringify(byId.get('nested/Beta').tags) === JSON.stringify(['idea', 'extra']), `nested/Beta tags: ${JSON.stringify(byId.get('nested/Beta').tags)}`);
+  assert(byId.get('Gamma').tag === undefined, 'a note without tags has no tag');
+  assert(byId.get('Gamma').folder === 'Sub' && byId.get('Alpha').folder === undefined, 'folder is the top-level folder');
+  assert(byId.get('nested/Beta').path === 'nested/Beta.md' && byId.get('Alpha').mtime === 1000, 'path and mtime carried');
+  const ghosts = g.nodes.filter(n => n.ghost).map(n => n.id).sort();
+  assert(JSON.stringify(ghosts) === JSON.stringify(['Missing', 'Other']), `expected ghosts Missing and Other (no attachment ghosts), got ${JSON.stringify(ghosts)}`);
+  assert(g.nodes.filter(n => n.ghost).every(n => n.path === undefined), 'ghosts carry no path');
+  const links = g.links.map(l => l.source + '>' + l.target).sort();
+  assert(JSON.stringify(links) === JSON.stringify(['./Beta>Missing', './Beta>Other', 'Alpha>./Beta', 'Alpha>Gamma', 'Alpha>Missing', 'nested/Beta>Alpha']),
+    `unexpected links ${JSON.stringify(links)}`);
+
+  // Same vault on disk: the plugin's ids match the scan's, so the saved
+  // layout stays valid when the source switches.
+  const dir = path.join(tmpRoot, 'bridge-ids-vault');
+  for (const f of bridgeFixture().files) writeFile(path.join(dir, f.path), 'x\n');
+  const scan = materializeGraph(await scanVaultEntries(dir), dir, {});
+  const scanIds = scan.nodes.map(n => n.id).sort();
+  const pluginIds = realIds.slice().sort();
+  assert(JSON.stringify(scanIds) === JSON.stringify(pluginIds), `plugin ids ${JSON.stringify(pluginIds)} differ from scan ids ${JSON.stringify(scanIds)}`);
+
+  // The plugin class writes through the vault adapter.
+  const written = {};
+  const app = {
+    vault: {
+      configDir: '.obsidian',
+      getMarkdownFiles: () => bridgeFixture().files,
+      adapter: { exists: async () => true, mkdir: async () => {}, write: async (p, d) => { written[p] = d; } },
+      on: () => ({})
+    },
+    metadataCache: { resolvedLinks: bridgeFixture().resolvedLinks, unresolvedLinks: {}, getFileCache: () => null, on: () => ({}) },
+    workspace: { onLayoutReady: () => {}, on: () => ({}), getActiveFile: () => bridgeFixture().files[0] }
+  };
+  const plugin = new BridgePlugin(app, { id: PLUGIN_ID, dir: '.obsidian/plugins/live-wallpaper-bridge' });
+  plugin.onload();
+  await plugin.writeGraph();
+  await plugin.writeActive();
+  plugin.onunload();
+  const gj = JSON.parse(written['.obsidian/plugins/live-wallpaper-bridge/graph.json']);
+  assert(gj.schema === 1 && gj.source === 'obsidian' && gj.generatedAt > 0 && gj.nodes.length === 4, 'plugin writes a schema-1 graph.json');
+  assert(validatePluginGraph(gj).nodes.length === 4, 'the server accepts what the plugin writes');
+  const aj = JSON.parse(written['.obsidian/plugins/live-wallpaper-bridge/active.json']);
+  assert(aj.id === 'nested/Beta' && aj.path === 'nested/Beta.md' && aj.at > 0, `active.json: ${JSON.stringify(aj)}`);
+}
+
+// Plugin graph vs scan selection, ignorePaths/showUnresolvedLinks applied to
+// the plugin graph, path stripped, /api/state and /api/active.
+async function runBridgeServerSelection(tmpRoot) {
+  const dir = path.join(tmpRoot, 'bridge-select-vault');
+  writeFile(path.join(dir, 'Alpha.md'), '[[Beta]]\n');
+  writeFile(path.join(dir, 'Beta.md'), '#scan\n');
+  writeFile(path.join(dir, 'templates', 'T.md'), 'x\n');
+  const old = new Date(Date.now() - 3600e3);
+  for (const f of ['Alpha.md', 'Beta.md', path.join('templates', 'T.md')]) fs.utimesSync(path.join(dir, f), old, old);
+  const entries = await scanVaultEntries(dir, ['templates']);
+  const newest = Math.max(...Array.from(entries.values()).map(e => e.mtimeMs));
+  const raw = {
+    schema: 1, generatedAt: newest + 1000, source: 'obsidian',
+    nodes: [
+      { id: 'Alpha', path: 'Alpha.md', tag: 'plug', mtime: 5 },
+      { id: 'Beta', path: 'Beta.md' },
+      { id: 'OnlyInPlugin', path: 'OnlyInPlugin.md' },
+      { id: 'T', path: 'templates/T.md', tag: 'tpl' },
+      { id: 'Missing', ghost: true },
+      { id: 'FromTemplateOnly', ghost: true },
+      { id: 'bad' }, // no path: dropped
+      42
+    ],
+    links: [
+      { source: 'Alpha', target: 'Beta' }, { source: 'Alpha', target: 'Missing' },
+      { source: 'T', target: 'FromTemplateOnly' }, { source: 'T', target: 'Alpha' },
+      { source: 'Alpha', target: 'nowhere' }
+    ]
+  };
+  const pluginGraph = validatePluginGraph(raw);
+  assert(pluginGraph.nodes.length === 6 && pluginGraph.links.length === 4, 'malformed plugin nodes/links are dropped');
+  const state = {
+    cfg: sanitizePersistedConfig({ vaultPath: dir, ignorePaths: ['templates'] }),
+    entries,
+    pluginGraph,
+    pluginActiveRaw: validatePluginActive({ path: 'templates/T.md', id: 'T', at: 1 })
+  };
+  const handler = createRequestHandler(state);
+  await rebuildGraphState(state);
+  assert(state.liveGraphSource === 'obsidian', 'auto uses a fresh plugin graph');
+  const served = JSON.parse(state.graphJson);
+  const ids = served.nodes.map(n => n.id).sort();
+  assert(JSON.stringify(ids) === JSON.stringify(['Alpha', 'Beta', 'Missing', 'OnlyInPlugin']), `ignorePaths applied to the plugin graph, got ${JSON.stringify(ids)}`);
+  assert(served.nodes.every(n => n.path === undefined), 'path is stripped before serving');
+  assert(served.links.length === 2, `links to/from ignored notes dropped, got ${JSON.stringify(served.links)}`);
+  assert(state.discoveredTags.plug === 1 && !state.discoveredTags.tpl && !state.discoveredTags.scan,
+    `discoveredTags come from the plugin graph, got ${JSON.stringify(state.discoveredTags)}`);
+  let st = JSON.parse((await runHandler(handler, 'GET', '/api/state')).body);
+  assert(st.graphSource === 'obsidian' && st.plugin.found === true, `/api/state should report the plugin source, got ${JSON.stringify(st)}`);
+  const active = JSON.parse((await runHandler(handler, 'GET', '/api/active')).body);
+  assert(active.id === null && active.path === 'templates/T.md', 'an active note under ignorePaths has no id');
+
+  state.cfg = { ...state.cfg, showUnresolvedLinks: false };
+  await rebuildGraphState(state);
+  assert(!JSON.parse(state.graphJson).nodes.some(n => n.ghost), 'showUnresolvedLinks false drops plugin ghosts');
+
+  // A note edited after the plugin's last write: the scan wins...
+  const now = Date.now();
+  const stale = { ...pluginGraph, generatedAt: now - 60e3 };
+  const edited = new Map([['x', { mtimeMs: now - 10e3 }]]);
+  let pick = chooseGraphSource({ cfg: { graphSource: 'auto' }, entries: edited, pluginGraph: stale }, now);
+  assert(pick.source === 'scan', 'auto falls back to the scan when a note is newer than the plugin graph');
+  // ...unless the plugin graph is live and the edit is seconds old (grace).
+  const justNow = new Map([['x', { mtimeMs: now - 1000 }]]);
+  pick = chooseGraphSource({ cfg: { graphSource: 'auto' }, entries: justNow, pluginGraph: stale, liveGraphSource: 'obsidian' }, now);
+  assert(pick.source === 'obsidian' && pick.recheckInMs > 0, 'a live plugin graph gets a short grace period after an edit');
+  pick = chooseGraphSource({ cfg: { graphSource: 'auto' }, entries: edited, pluginGraph: { ...stale, generatedAt: now - 11e3 } }, now);
+  assert(pick.source === 'obsidian', 'within the 2 s slack the plugin graph counts as fresh');
+  pick = chooseGraphSource({ cfg: { graphSource: 'obsidian' }, entries: edited, pluginGraph: stale }, now);
+  assert(pick.source === 'obsidian', "'obsidian' uses a stale plugin graph");
+  pick = chooseGraphSource({ cfg: { graphSource: 'scan' }, entries: edited, pluginGraph: { ...stale, generatedAt: now } }, now);
+  assert(pick.source === 'scan', "'scan' never uses the plugin graph");
+  pick = chooseGraphSource({ cfg: { graphSource: 'obsidian' }, entries: edited, pluginGraph: null }, now);
+  assert(pick.source === 'scan', 'no plugin graph means the scan');
+
+  state.cfg = { ...state.cfg, graphSource: 'scan', showUnresolvedLinks: true };
+  await rebuildGraphState(state);
+  assert(state.liveGraphSource === 'scan' && !JSON.parse(state.graphJson).nodes.some(n => n.id === 'OnlyInPlugin'), "'scan' serves the scanned graph");
+  st = JSON.parse((await runHandler(handler, 'GET', '/api/state')).body);
+  assert(st.graphSource === 'scan', '/api/state reports the scan');
+
+  // Invalid plugin files are rejected.
+  const bad = [
+    { ...raw, schema: 2 },
+    { ...raw, generatedAt: 'now' },
+    { ...raw, nodes: 'x' },
+    { schema: 1, generatedAt: 1, nodes: new Array(200001).fill(null), links: [] },
+    []
+  ];
+  for (const b of bad) {
+    let threw = false;
+    try { validatePluginGraph(b); } catch (_) { threw = true; }
+    assert(threw, `expected an invalid plugin graph to be rejected: ${JSON.stringify(b).slice(0, 60)}`);
+  }
+  let threw = false;
+  try { validatePluginActive({ id: 5 }); } catch (_) { threw = true; }
+  assert(threw, 'an invalid active.json is rejected');
+  assert(materializePluginGraph({ nodes: [], links: [] }, dir, {}).nodes.length === 0, 'an empty plugin graph materializes');
+}
+
+// End to end through the real watcher: an invalid plugin file is ignored, a
+// valid one takes over, active.json reaches /api/active and an SSE 'active'
+// event, and deleting graph.json falls back to the scan.
+async function runBridgeLiveWatcher(tmpRoot) {
+  const vaultDir = path.join(tmpRoot, 'bridge-live-vault');
+  writeFile(path.join(vaultDir, 'Alpha.md'), '# Alpha\n');
+  const old = new Date(Date.now() - 3600e3);
+  fs.utimesSync(path.join(vaultDir, 'Alpha.md'), old, old);
+  const pdir = pluginDir(vaultDir);
+  fs.mkdirSync(pdir, { recursive: true });
+  writeJson(path.join(pdir, 'graph.json'), { schema: 99, generatedAt: Date.now(), nodes: [], links: [] });
+  const configPath = path.join(tmpRoot, 'bridge-live-config.json');
+  const port = await freePort();
+  writeJson(configPath, { vaultPath: vaultDir, port });
+  const app = await startApp({ configPath, outPath: path.join(tmpRoot, 'bridge-live-graph.json') });
+  const waitFor = async (cond, timeoutMs) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (cond()) return true;
+      await new Promise(r => setTimeout(r, 100));
+    }
+    return cond();
+  };
+  const get = p => new Promise((resolve, reject) => {
+    http.get({ host: '127.0.0.1', port, path: p }, res => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', c => { body += c; });
+      res.on('end', () => { try { resolve(JSON.parse(body)); } catch (e) { reject(e); } });
+    }).on('error', reject);
+  });
+  let sseReq = null;
+  try {
+    // The server may still be binding; wait until it answers.
+    assert(await waitFor(() => app.server.listening, 3000), 'server never started listening');
+    assert(app.state.liveGraphSource === 'scan', 'an invalid plugin graph.json is ignored');
+    await Promise.race([
+      app.pluginWatcherReady,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('plugin watcher never became ready')), 5000))
+    ]);
+    await new Promise(r => setTimeout(r, 300));
+
+    writeJson(path.join(pdir, 'graph.json'), {
+      schema: 1, generatedAt: Date.now(), source: 'obsidian',
+      nodes: [{ id: 'Alpha', path: 'Alpha.md' }, { id: 'Plugged', path: 'Plugged.md' }],
+      links: [{ source: 'Plugged', target: 'Alpha' }]
+    });
+    assert(await waitFor(() => app.state.liveGraphSource === 'obsidian', 5000), 'a valid plugin graph.json is picked up by the watcher');
+    const graph = await get('/graph.json');
+    assert(graph.nodes.some(n => n.id === 'Plugged') && graph.nodes.every(n => n.path === undefined), 'the plugin graph is served without paths');
+    assert((await get('/api/state')).graphSource === 'obsidian', '/api/state reports obsidian');
+
+    const events = [];
+    await new Promise((resolve, reject) => {
+      sseReq = http.get({ host: '127.0.0.1', port, path: '/events' }, res => {
+        res.setEncoding('utf8');
+        let buf = '';
+        res.on('data', c => {
+          buf += c;
+          let i;
+          while ((i = buf.indexOf('\n\n')) >= 0) {
+            const block = buf.slice(0, i);
+            buf = buf.slice(i + 2);
+            const ev = (block.match(/^event: (.*)$/m) || [])[1];
+            const data = (block.match(/^data: (.*)$/m) || [])[1];
+            events.push({ ev, data: data ? JSON.parse(data) : null });
+            if (ev === 'hello') resolve();
+          }
+        });
+      });
+      sseReq.on('error', reject);
+    });
+    writeJson(path.join(pdir, 'active.json'), { path: 'Alpha.md', id: 'Alpha', at: Date.now() });
+    assert(await waitFor(() => events.some(e => e.ev === 'active' && e.data && e.data.id === 'Alpha'), 5000), 'an SSE active event follows active.json');
+    const active = await get('/api/active');
+    assert(active.id === 'Alpha' && active.path === 'Alpha.md', `/api/active serves the open note, got ${JSON.stringify(active)}`);
+
+    fs.unlinkSync(path.join(pdir, 'graph.json'));
+    assert(await waitFor(() => app.state.liveGraphSource === 'scan', 5000), 'deleting the plugin graph falls back to the scan');
+  } finally {
+    if (sseReq) sseReq.destroy();
+    process.removeAllListeners('SIGINT');
+    process.removeAllListeners('SIGTERM');
+    for (const c of app.state.eventClients) { try { c.end(); } catch (_) {} }
+    await app.watcher.close();
+    await app.configWatcher.close();
+    await app.pluginWatcher.close();
+    await new Promise(r => app.server.close(r));
+  }
 }
 
 async function runLinkResolution(tmpRoot) {
@@ -1198,6 +1507,10 @@ async function main() {
     await runEaddrinuse(tmpRoot);
     await runEaddrinuseOwnInstance(tmpRoot);
     await runLinkResolution(tmpRoot);
+    await runDuplicateBasenameResolution(tmpRoot);
+    await runBridgePluginBuilder(tmpRoot);
+    await runBridgeServerSelection(tmpRoot);
+    await runBridgeLiveWatcher(tmpRoot);
     await runNewRoutes(tmpRoot);
     console.log('smoke: ok');
   } finally {
