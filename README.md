@@ -153,14 +153,15 @@ For autostart and troubleshooting, see the platform-specific guides:
 Three layers, each ignorant of the others:
 
 ```
-┌──────────┐    graph.json    ┌──────────┐  127.0.0.1:3000  ┌────────────┐
-│  parser  │ ───────────────▶ │ renderer │ ───────────────▶ │ Plash /    │
-│ (Node)   │                  │  (d3)    │                  │ Lively     │
-└──────────┘                  └──────────┘                  └────────────┘
+┌──────────┐  HTTP + SSE on   ┌──────────┐   web page at    ┌────────────┐
+│  parser  │  127.0.0.1:3000  │ renderer │  127.0.0.1:3000  │ Plash /    │
+│ (Node)   │ ───────────────▶ │  (d3)    │ ───────────────▶ │ Lively     │
+└──────────┘ /graph.json,     └──────────┘                  └────────────┘
+             /api/config, /events
 ```
 
-1. **`parser.js`** watches your vault, parses `[[wikilinks]]` and tags from every `.md` file, and serves the graph and app on the local loopback interface (`127.0.0.1:3000` by default). Links resolve the way Obsidian does: case-insensitively, by path, and ignoring image and PDF embeds.
-2. **`index.html`** loads the graph and runs the layout in a Web Worker (`worker.js` + `layout-core.js`). It draws with the active theme from `themes/`, and updates live when your vault changes. Editing a note's text doesn't move anything; adding a note only relaxes the layout around it.
+1. **`parser.js`** watches your vault, parses `[[wikilinks]]` and tags from every `.md` file, and serves the graph and app on the local loopback interface (`127.0.0.1:3000` by default). The graph is held in memory and served at `/graph.json`; changes are pushed to the page over a server-sent-events stream, so nothing is handed off through files (a `graph.json` copy is only written next to the config at startup and shutdown, as a cold-start fallback and debugging aid). Links resolve the way Obsidian does: case-insensitively, by path, and ignoring image and PDF embeds.
+2. **`index.html`** fetches the graph over HTTP and runs the layout in a Web Worker (`worker.js` + `layout-core.js`). It draws with the active theme from `themes/`, and updates live when your vault changes. Editing a note's text doesn't move anything; adding a note only relaxes the layout around it.
 3. **Plash / Lively** renders the page as your desktop wallpaper.
 
 The clean separation means only the host changes per platform.
@@ -174,19 +175,19 @@ The renderer ships with a local vendored copy of D3, so the wallpaper still work
 | Option | Default | Description |
 |--------|---------|-------------|
 | `vaultPath` | — | Absolute path to your Obsidian vault |
-| `port` | `3000` | Local HTTP port for the wallpaper server |
-| `accent` | `#7c5cff` | Default node and edge color |
+| `port` | `3000` | Local HTTP port for the wallpaper server (`1`–`65535`) |
+| `accent` | `#7c5cff` | Default node and edge color (6-digit hex, as for every color option) |
 | `background` | `#0a0a0f` | Canvas background color |
-| `refreshMs` | `5000` | Fallback refresh interval in ms when live updates are unavailable |
-| `linkOpacity` | `0.18` | Base opacity for graph edges |
+| `refreshMs` | `5000` | Fallback polling interval in ms, used only when the live update stream is unavailable (`1000`–`60000`) |
+| `linkOpacity` | `0.18` | Base opacity for graph edges (`0`–`1`) |
 | `nodeGlow` | `true` | Radial glow halo around each node |
 | `glowIntensity` | `1` | Glow halo strength (`0`–`1`); lower for flatter looks |
 | `edgeStyle` | `"line"` | Edge rendering: `line`, `curve`, or `none` |
 | `nodeColorMode` | `"tag"` | Node coloring: `tag` (by first tag), `age` (by modified time), `folder` (by top-level vault folder), or `recency` (tag colours, dimming notes older than `recencyDays`) |
 | `labelFont` | `"sans"` | Label typeface: `sans`, `mono`, or `serif` |
 | `particles` | `true` | Dots flowing along edges |
-| `particleSpeed` | `1` | Multiplier for particle travel speed |
-| `particleDensity` | `0.3` | Particle spawn density along links |
+| `particleSpeed` | `1` | Multiplier for particle travel speed (`0.1`–`3`) |
+| `particleDensity` | `0.3` | Particle spawn density along links (`0.05`–`1`) |
 | `motionMode` | `"balanced"` | Ambient movement profile: `still`, `light`, `balanced`, or `showcase` |
 | `clusterByTag` | `true` | Same-tag nodes gravitate together |
 | `clusterHalos` | `true` | Soft color fields behind major tag clusters |
@@ -195,8 +196,8 @@ The renderer ships with a local vendored copy of D3, so the wallpaper still work
 | `depthOfField` | `true` | Peripheral nodes dimmer and smaller |
 | `noteFlare` | `true` | New notes flash white when they appear |
 | `hubLabels` | `false` | Show names on most-connected nodes |
-| `hubLabelCount` | `5` | Maximum number of node labels shown when `hubLabels` is on |
-| `labelMinImportance` | `0.22` | Minimum node importance required before labels appear |
+| `hubLabelCount` | `5` | Maximum number of node labels shown when `hubLabels` is on (`1`–`50`) |
+| `labelMinImportance` | `0.22` | Minimum node importance required before labels appear (`0`–`1`) |
 | `autoScaleLargeVaults` | `true` | Automatically reduces particles, labels, and edge density on dense graphs |
 | `maxRenderedNodes` | `5000` | Hard cap on rendered nodes (`100`–`100000`); lowest-importance nodes drop first |
 | `showUnresolvedLinks` | `true` | Show ghost nodes for `[[links]]` to notes that don't exist yet |
@@ -219,25 +220,25 @@ The renderer ships with a local vendored copy of D3, so the wallpaper still work
 | `depthParallaxStrength` | `0.5` | Layer separation intensity (`0`–`1`) |
 | `depthParallaxLayers` | `3` | Number of depth layers (`2`–`4`) |
 | `theme` | `"default"` | Rendering theme: `default` or any file in `themes/` (`aurora`, `synapse`, `mycelium`, `phosphor`, `led`, `pixel`, `territories`, `survey`, `metro`, `riso`, `bauhaus`, `stitch`, `stained-glass`, `celestial`, `wash`, `sketch`) |
-| `labelStyle` | `{}` | Label styling: `mode` (`badge`, `glow`, `minimal`, `inherit`), `backgroundAlpha`, `glowColor`, `chromaticSplit`. The font comes from `labelFont`. |
+| `labelStyle` | `{}` | Label styling: `mode` (`badge`, `glow`, `minimal`, `inherit`), `backgroundAlpha`, `glowColor`, `chromaticSplit`. `backgroundAlpha` is `0`–`0.9`; `glowColor` is `accent`, `node` or a hex color. The font comes from `labelFont`. |
 | `layout` | `"force"` | `force`, `rings`, `timeline`, or `galaxy` |
 | `framing` | `"center"` | Where the graph sits: `center`, `fill`, `left`, `right`, or `none` (raw layout coordinates, the pre-1.2 behaviour) |
 | `zoom` | `1` | Extra scale on top of framing (`0.4`–`3`) |
 | `offsetX` / `offsetY` | `0` | Nudge the graph by up to half the framed area (`-1`–`1`) |
-| `safeArea` | all `0` | Pixels to keep clear on each side: `{ "top": 30, "right": 130, "bottom": 90, "left": 0 }` for a macOS menu bar, dock and icons |
+| `safeArea` | all `0` | Pixels to keep clear on each side (`0`–`1000` each): `{ "top": 30, "right": 130, "bottom": 90, "left": 0 }` for a macOS menu bar, dock and icons |
 | `palette` | `"auto"` | `auto` (the theme's own colours or `tagColors`), `aurora`, `riso`, `metro`, `pastel`, `earth`, `neon`, `viridis`, `mono`. `tagColors` always wins for the tags it names. |
-| `recencyDays` | `7` | Days a note counts as recent, for `recency` colouring and Synapse/Mycelium pulses |
+| `recencyDays` | `7` | Days a note counts as recent, for `recency` colouring and Synapse/Mycelium pulses (`1`–`365`) |
 | `timeOfDay` | `"off"` | `tint` (night, dawn and dusk colour wash) or `palette` (light colours from 07:00 to 19:00) |
 | `tagShapes` | `false` | Circle, square, triangle or diamond per tag in the default theme |
 | `grain` | `true` | Fine film grain; also hides gradient banding on large displays |
 | `vignette` | `false` | Darken the screen edges |
 | `overlay` | `"none"` | `clock`, `stats`, or `note` (note of the hour) |
 | `labelSource` | `"hubs"` | Label the most-linked notes, or the most `recent` edits |
-| `focusNote` | `""` | Show only this note's neighbourhood; `today` means today's daily note |
+| `focusNote` | `""` | Show only this note's neighbourhood; `today` means today's daily note (up to 300 characters) |
 | `focusHops` | `2` | How many links out from `focusNote` to show (`1`–`4`) |
-| `rotate` | `{ "themes": [], "everyMinutes": 60 }` | Cycle through these themes |
-| `maxFps` | `30` | Frame cap while something is changing; `0` = only redraw on change |
-| `idleFps` | `5` | Frame rate once the scene is settled; `0` = hold the last frame (near-zero CPU) |
+| `rotate` | `{ "themes": [], "everyMinutes": 60 }` | Cycle through these themes (up to 32 theme ids; `everyMinutes` `1`–`1440`) |
+| `maxFps` | `30` | Frame cap while something is changing (`0`–`60`); `0` = only redraw on change |
+| `idleFps` | `5` | Frame rate once the scene is settled (`0`–`30`); `0` = hold the last frame (near-zero CPU) |
 | `renderer` | `"auto"` | `auto` uses WebGL2 for vaults over ~3,000 notes; force `canvas` or `webgl` |
 
 ### Tags vs links

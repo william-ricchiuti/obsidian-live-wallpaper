@@ -123,8 +123,8 @@ Follow the instructions pm2 prints to complete the startup hook.
 
 ## Troubleshooting
 
-- **Blank wallpaper**: check that `graph.json` exists in the project folder. If not, the parser isn't running or `vaultPath` is wrong.
+- **Blank wallpaper**: run `curl -s http://127.0.0.1:3000/graph.json | head -c 300` (or open that URL in a browser). If it doesn't answer, the server isn't running; if it answers with no nodes, check the server log (`pm2 logs`, your service manager's log, or the terminal running it) for `vaultPath` or config errors. The graph is served from memory, so a `graph.json` file on disk isn't a reliable signal.
 - **Browser window covers desktop icons**: make sure your wallpaper host is pinning the window below all others. With xwinwrap, the `-b` flag handles this.
 - **Nodes not updating**: edit a note in Obsidian and check the parser terminal for output like `graph: 42 nodes, 87 links`.
 - **Wayland issues**: xwinwrap doesn't work on Wayland. Use KDE's HTML Wallpaper plugin, Hidamari for GNOME, or check your compositor's docs for layer-shell wallpaper support.
-- **Performance**: if your vault is 2000+ notes, increase `refreshMs` to 10000 in `config.json`.
+- **Performance**: for large vaults (2000+ notes), lower `maxRenderedNodes` (the least important nodes are dropped first), lower `idleFps` (`0` holds the last frame once the layout settles) and `maxFps`, and try `"renderer": "webgl"` (`auto` only switches to WebGL above ~3,000 notes). `refreshMs` won't help: it is only the fallback polling interval used when the live update stream is unavailable.

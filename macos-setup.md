@@ -48,7 +48,7 @@ or run `tail -f ~/Library/Logs/obsidian-live-wallpaper.log`.
 
 ## Troubleshooting
 
-- **Blank wallpaper**: check that `graph.json` exists in the project folder. If not, the parser isn't running or `vaultPath` is wrong.
+- **Blank wallpaper**: run `curl -s http://127.0.0.1:3000/graph.json | head -c 300` (or open that URL in a browser). If it doesn't answer, the server isn't running; if it answers with no nodes, check the server log (the terminal running it, or your launchd/pm2 log) for `vaultPath` or config errors. The graph is served from memory, so a `graph.json` file on disk isn't a reliable signal.
 - **Plash shows "file not found"**: make sure the parser is running and the URL is `http://127.0.0.1:3000`, not a `file:///` path.
 - **Nodes not updating**: confirm chokidar is watching by editing a note and checking the parser's terminal output.
-- **Performance**: if your vault is 2000+ notes, increase `refreshMs` to 10000 in `config.json`.
+- **Performance**: for large vaults (2000+ notes), lower `maxRenderedNodes` (the least important nodes are dropped first), lower `idleFps` (`0` holds the last frame once the layout settles) and `maxFps`, and try `"renderer": "webgl"` (`auto` only switches to WebGL above ~3,000 notes). `refreshMs` won't help: it is only the fallback polling interval used when the live update stream is unavailable.
