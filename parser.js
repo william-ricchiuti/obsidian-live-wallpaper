@@ -332,13 +332,32 @@ function validateRotate(value, key) {
   return out;
 }
 
-function isIgnoredPath(filePath, vaultPath, patterns) {
+// macOS (APFS/HFS+ default) and Windows file systems are case-insensitive, so
+// "Templates" in ignorePaths must also hide "templates/".
+const CASE_INSENSITIVE_FS = process.platform === 'win32' || process.platform === 'darwin';
+
+// "templates/", "\\Archive\\Old", "./drafts" -> "templates", "Archive/Old", "drafts".
+function normalizeIgnorePattern(pattern, caseInsensitive) {
+  const s = String(pattern).trim().replace(/[\\/]+/g, '/').replace(/^(\.\/)+/, '').replace(/^\/+|\/+$/g, '');
+  return caseInsensitive ? s.toLowerCase() : s;
+}
+
+// An ignorePaths entry matches a vault-relative path prefix ("Archive/Old"
+// hides everything under it) or any single path segment ("templates" hides
+// every folder or file of that name at any depth). '/' and '\\' are the same
+// separator; matching is case-insensitive on macOS and Windows.
+function isIgnoredPath(filePath, vaultPath, patterns, caseInsensitive = CASE_INSENSITIVE_FS) {
   if (!patterns || patterns.length === 0) return false;
-  const rel = path.relative(vaultPath, filePath);
-  if (!rel || rel.startsWith('..')) return true;
-  for (const p of patterns) {
-    if (rel === p || rel.startsWith(p + path.sep)) return true;
-    if (rel.split(path.sep).includes(p)) return true;
+  const relRaw = path.relative(vaultPath, filePath);
+  if (!relRaw || relRaw.startsWith('..')) return true;
+  let rel = relRaw.replace(/\\/g, '/');
+  if (caseInsensitive) rel = rel.toLowerCase();
+  const segments = rel.split('/');
+  for (const raw of patterns) {
+    const p = normalizeIgnorePattern(raw, caseInsensitive);
+    if (!p) continue;
+    if (rel === p || rel.startsWith(p + '/')) return true;
+    if (segments.includes(p)) return true;
   }
   return false;
 }
@@ -665,9 +684,21 @@ async function collectMarkdownFiles(vaultPath, patterns) {
       if (entry.name.startsWith('.')) continue;
       const fullPath = path.join(dir, entry.name);
       if (isIgnoredPath(fullPath, vaultPath, patterns)) continue;
-      if (entry.isDirectory()) {
+      let isDir = entry.isDirectory();
+      let isFile = entry.isFile();
+      if (entry.isSymbolicLink()) {
+        // Follow symlinks, like the chokidar watcher does (followSymlinks), so a
+        // symlinked note or folder doesn't vanish on the next full rescan.
+        // Broken links are skipped; the realpath guard in walk() stops cycles.
+        try {
+          const target = await fs.promises.stat(fullPath);
+          isDir = target.isDirectory();
+          isFile = target.isFile();
+        } catch (_) { continue; }
+      }
+      if (isDir) {
         await walk(fullPath);
-      } else if (entry.isFile() && entry.name.endsWith('.md')) {
+      } else if (isFile && entry.name.endsWith('.md')) {
         files.push(fullPath);
       }
     }
@@ -863,6 +894,17 @@ function serveJson(res, value) {
   res.end(JSON.stringify(value));
 }
 
+// The settings page has controls that change config, so another site must not
+// be able to frame it (clickjacking). frame-ancestors 'self' still allows the
+// settings page's own same-origin preview iframe. index.html (the wallpaper
+// itself) stays frameable: it has no controls, and some wallpaper/widget hosts
+// embed it in an iframe from their own origin.
+const FRAME_PROTECTED_FILES = new Set(['settings.html']);
+const FRAME_PROTECTION_HEADERS = {
+  'Content-Security-Policy': "frame-ancestors 'self'",
+  'X-Frame-Options': 'SAMEORIGIN'
+};
+
 function serveFile(res, filePath, cacheControl = STATIC_CACHE_CONTROL) {
   const ext = path.extname(filePath);
   const mime = {
@@ -876,7 +918,9 @@ function serveFile(res, filePath, cacheControl = STATIC_CACHE_CONTROL) {
   }[ext] || 'application/octet-stream';
   try {
     const stat = fs.statSync(filePath);
-    res.writeHead(200, { ...defaultHeaders(mime, cacheControl), 'Content-Length': String(stat.size) });
+    const headers = { ...defaultHeaders(mime, cacheControl), 'Content-Length': String(stat.size) };
+    if (FRAME_PROTECTED_FILES.has(path.basename(filePath))) Object.assign(headers, FRAME_PROTECTION_HEADERS);
+    res.writeHead(200, headers);
     const stream = fs.createReadStream(filePath, { highWaterMark: 64 * 1024 });
     stream.pipe(res);
     stream.on('error', () => {
@@ -899,34 +943,75 @@ function serveFile(res, filePath, cacheControl = STATIC_CACHE_CONTROL) {
 // extra layer of defense against that on top of the loopback bind.
 const TRUSTED_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
 
+// Host header -> hostname, or null when malformed. Handles bracketed IPv6
+// ("[::1]:3000" -> "[::1]"); a bare IPv6 address is not a valid Host value.
+function hostnameFromHostHeader(hostHeader) {
+  const h = hostHeader.trim().toLowerCase();
+  if (!h) return null;
+  if (h.startsWith('[')) {
+    const end = h.indexOf(']');
+    if (end < 0) return null;
+    const rest = h.slice(end + 1);
+    if (rest && !/^:\d{1,5}$/.test(rest)) return null;
+    return h.slice(0, end + 1);
+  }
+  const parts = h.split(':');
+  if (parts.length > 2) return null;
+  if (parts.length === 2 && !/^\d{1,5}$/.test(parts[1])) return null;
+  return parts[0] || null;
+}
+
 function isTrustedHost(hostHeader) {
   if (typeof hostHeader !== 'string') return false;
-  const hostname = hostHeader.split(':')[0].toLowerCase();
-  return TRUSTED_HOSTS.has(hostname);
+  const hostname = hostnameFromHostHeader(hostHeader);
+  return hostname !== null && TRUSTED_HOSTS.has(hostname);
 }
+
+// Media type match that ignores parameters: "application/json; charset=utf-8" is JSON.
+function isJsonContentType(header) {
+  return typeof header === 'string' && header.split(';')[0].trim().toLowerCase() === 'application/json';
+}
+
+// After a 413, the rest of an oversized body is read and discarded (up to this
+// much) instead of resetting the socket mid-upload, so the client actually
+// receives the 413. Past the cap the connection is dropped once the response
+// has been flushed.
+const MAX_DISCARD_BYTES = 16e6;
 
 function readBody(req, res, maxBytes = MAX_BODY_BYTES) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let bytes = 0;
     let tooLarge = false;
+    let discarded = 0;
     req.on('data', chunk => {
-      if (tooLarge) return;
+      if (tooLarge) {
+        discarded += chunk.length;
+        if (discarded > MAX_DISCARD_BYTES && !req.destroyed) {
+          if (res.writableFinished) req.destroy();
+          else if (typeof res.once === 'function') res.once('finish', () => req.destroy());
+          if (typeof req.pause === 'function') req.pause();
+        }
+        return;
+      }
       // chunk is a Buffer; .length is bytes. Accumulating into a '' string
       // instead and checking .length there would count UTF-16 code units, not
       // bytes — undercounting the real size of multibyte (e.g. UTF-8) input.
       bytes += chunk.length;
       if (bytes > maxBytes) {
         tooLarge = true;
+        chunks.length = 0;
+        // Stop buffering and answer now; the rest of the body is drained above.
+        // (No "Connection: close": that makes Node close the socket while the
+        // client is still uploading, which it sees as EPIPE instead of a 413.)
         res.writeHead(413, defaultHeaders('application/json', DYNAMIC_CACHE_CONTROL));
         res.end(JSON.stringify({ error: 'request body too large' }));
-        req.destroy();
         reject(new Error('request body too large'));
         return;
       }
       chunks.push(chunk);
     });
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    req.on('end', () => { if (!tooLarge) resolve(Buffer.concat(chunks).toString('utf8')); });
     req.on('error', reject);
   });
 }
@@ -971,7 +1056,19 @@ async function applyFsEventToState(state, event, filePath) {
   if (typeof filePath !== 'string') return false;
   if (isOutsideVault(filePath, state.cfg.vaultPath)) return false;
 
+  // Watcher events are handled concurrently, so an older add/change parse can
+  // finish after a newer event for the same path (or after an unlink) and
+  // would otherwise resurrect a deleted note or overwrite newer content. Each
+  // add/change takes a token; any later event for the path replaces or clears
+  // it, and a parse whose token is no longer current is discarded. The map only
+  // holds paths with a parse in flight.
+  if (!state.fsPending) state.fsPending = new Map();
+  const pending = state.fsPending;
+
   if (event === 'unlinkDir') {
+    for (const p of Array.from(pending.keys())) {
+      if (p === filePath || p.startsWith(filePath + path.sep)) pending.delete(p);
+    }
     let removed = false;
     for (const existingPath of state.entries.keys()) {
       if (existingPath === filePath || existingPath.startsWith(filePath + path.sep)) {
@@ -988,6 +1085,7 @@ async function applyFsEventToState(state, event, filePath) {
   }
 
   if (event === 'unlink') {
+    pending.delete(filePath);
     return state.entries.delete(filePath);
   }
 
@@ -995,15 +1093,24 @@ async function applyFsEventToState(state, event, filePath) {
     return false;
   }
 
+  state.fsSeq = (state.fsSeq || 0) + 1;
+  const token = state.fsSeq;
+  pending.set(filePath, token);
+  const isCurrent = () => state.fsPending === pending && pending.get(filePath) === token;
+  const finish = () => { if (pending.get(filePath) === token) pending.delete(filePath); };
+
   let stat;
   try {
     stat = await fs.promises.stat(filePath);
   } catch (_) {
+    finish();
     return false;
   }
-  if (!stat.isFile()) return false;
+  if (!stat.isFile()) { finish(); return false; }
 
   const nextEntry = await parseMarkdownEntry(filePath);
+  if (!isCurrent()) return false; // superseded by a newer event: drop this result
+  finish();
   if (!nextEntry) return false;
   const prev = state.entries.get(filePath);
   state.entries.set(filePath, nextEntry);
@@ -1038,11 +1145,23 @@ async function readHead(filePath, limit) {
 
 async function pickNoteOfHour(state, hourParam) {
   const ids = state.realNoteIds || [];
-  const entries = state.entries ? Array.from(state.entries.values()) : [];
-  if (!entries.length) return { title: '', excerpt: '', folder: '', mtime: 0 };
+  const size = state.entries ? state.entries.size : 0;
+  if (!size) return { title: '', excerpt: '', folder: '', mtime: 0 };
   const hourKey = /^\d{1,10}$/.test(hourParam || '') ? hourParam : String(Math.floor(Date.now() / 3600000));
-  // Sort by path so the pick is stable regardless of Map insertion order.
-  const sorted = entries.slice().sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  // Sort by path so the pick is stable regardless of Map insertion order. The
+  // sorted list is cached per graph version (and entries map / size, which
+  // change before the debounced rebuild bumps the version), not rebuilt on
+  // every request.
+  const cache = state.noteOfHourCache;
+  if (!cache || cache.version !== state.graphVersion || cache.entries !== state.entries || cache.size !== size) {
+    state.noteOfHourCache = {
+      version: state.graphVersion,
+      entries: state.entries,
+      size,
+      sorted: Array.from(state.entries.values()).sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+    };
+  }
+  const sorted = state.noteOfHourCache.sorted;
   // Prefer notes with some body text; try a few candidates before giving up.
   for (let attempt = 0; attempt < 8; attempt++) {
     const entry = sorted[hashString(hourKey + ':' + attempt) % sorted.length];
@@ -1057,7 +1176,7 @@ async function pickNoteOfHour(state, hourParam) {
       excerpt,
       folder: sep > 0 ? rel.slice(0, sep).replace(/\\/g, '/') : '',
       mtime: entry.mtimeMs || 0,
-      noteCount: ids.length || entries.length
+      noteCount: ids.length || size
     };
   }
   return { title: '', excerpt: '', folder: '', mtime: 0 };
@@ -1114,7 +1233,7 @@ async function handleLayout(state, req, res) {
     return json(200, {});
   }
   if (req.method !== 'POST') return json(405, { error: 'method not allowed' });
-  if (req.headers['content-type'] !== 'application/json') return json(415, { error: 'Content-Type must be application/json' });
+  if (!isJsonContentType(req.headers['content-type'])) return json(415, { error: 'Content-Type must be application/json' });
   try {
     state.layout = sanitizeLayout(JSON.parse(await readBody(req, res, MAX_LAYOUT_BYTES)));
     // Several screens (span mode) settle at the same moment; write once.
@@ -1136,10 +1255,52 @@ async function handleLayout(state, req, res) {
 function customPresetsPath(state) {
   return path.join(path.dirname(state.configPath || cfgPath), 'custom-presets.json');
 }
+const MAX_CUSTOM_PRESETS = 100;
+// Keys a preset never carries: they describe this vault, not a look.
+const PRESET_EXCLUDED_KEYS = new Set(['tagColors', 'ignorePaths', 'focusNote']);
+
+// Validates one preset's config key by key: a key the server no longer knows
+// (or a value that no longer validates) is dropped rather than losing the
+// whole preset after an upgrade.
+function sanitizePresetConfig(raw) {
+  const out = {};
+  if (!isPlainObject(raw)) return out;
+  for (const [key, value] of Object.entries(raw)) {
+    if (PRESET_EXCLUDED_KEYS.has(key) || !Object.hasOwn(VALIDATORS, key)) continue;
+    const v = VALIDATORS[key];
+    try { out[key] = v.fn(value, key, ...(v.args || [])); } catch (_) { /* drop the bad key */ }
+  }
+  return out;
+}
+
+// custom-presets.json is hand-editable, so every entry is re-validated on
+// read; malformed entries are dropped and the list is capped.
+function sanitizeCustomPresets(list) {
+  if (!Array.isArray(list)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const p of list) {
+    if (out.length >= MAX_CUSTOM_PRESETS) break;
+    if (!isPlainObject(p) || typeof p.name !== 'string') continue;
+    const name = p.name.trim();
+    if (!name || name.length > 60 || seen.has(name)) continue;
+    seen.add(name);
+    const config = sanitizePresetConfig(p.config);
+    out.push({
+      name,
+      description: 'Custom preset',
+      accent: config.accent || (typeof p.accent === 'string' && HEX_COLOR.test(p.accent) ? p.accent : DEFAULTS.accent),
+      background: config.background || (typeof p.background === 'string' && HEX_COLOR.test(p.background) ? p.background : DEFAULTS.background),
+      custom: true,
+      config
+    });
+  }
+  return out;
+}
+
 function readCustomPresets(state) {
   try {
-    const list = JSON.parse(fs.readFileSync(customPresetsPath(state), 'utf8'));
-    return Array.isArray(list) ? list : [];
+    return sanitizeCustomPresets(JSON.parse(fs.readFileSync(customPresetsPath(state), 'utf8')));
   } catch (_) {
     return [];
   }
@@ -1153,12 +1314,17 @@ async function handleCustomPresets(state, req, res, requestUrl) {
   if (req.method === 'GET') return json(200, readCustomPresets(state));
   try {
     if (req.method === 'POST') {
-      if (req.headers['content-type'] !== 'application/json') return json(415, { error: 'Content-Type must be application/json' });
+      if (!isJsonContentType(req.headers['content-type'])) return json(415, { error: 'Content-Type must be application/json' });
       const body = JSON.parse(await readBody(req, res));
       const name = validateString(body && body.name, 'name', 60);
       if (!name) throw new Error('name is required');
-      const config = sanitizeConfigPatch(body.config || {});
+      // Strict on write (an invalid value is a 400), then vault-specific keys
+      // are dropped.
+      const config = sanitizePresetConfig(sanitizeConfigPatch(body.config || {}));
       const list = readCustomPresets(state).filter(p => p.name !== name);
+      if (list.length >= MAX_CUSTOM_PRESETS) {
+        throw new Error(`too many custom presets (max ${MAX_CUSTOM_PRESETS}); delete one first`);
+      }
       list.push({ name, description: 'Custom preset', accent: config.accent || state.cfg.accent, background: config.background || state.cfg.background, custom: true, config });
       writeConfigFile(list, customPresetsPath(state));
       return json(200, list);
@@ -1273,7 +1439,7 @@ function createRequestHandler(state) {
         res.end(JSON.stringify({ error: 'untrusted Host header' }));
         return;
       }
-      if (req.headers['content-type'] !== 'application/json') {
+      if (!isJsonContentType(req.headers['content-type'])) {
         res.writeHead(415, defaultHeaders('application/json', DYNAMIC_CACHE_CONTROL));
         res.end(JSON.stringify({ error: 'Content-Type must be application/json' }));
         return;
@@ -1281,16 +1447,29 @@ function createRequestHandler(state) {
       try {
         const body = JSON.parse(await readBody(req, res));
         const patch = sanitizeConfigPatch(body);
-        const updated = { ...state.cfg, ...patch, vaultPath: state.cfg.vaultPath, port: state.cfg.port };
+        // Merge onto the file on disk, not just state.cfg: a hand edit of
+        // config.json may not have been picked up yet (the reload is
+        // debounced), and writing state.cfg back would silently undo it. An
+        // invalid or unreadable file falls back to the in-memory config.
+        let base = state.cfg;
+        if (state.configPath) {
+          try { base = sanitizePersistedConfig(JSON.parse(fs.readFileSync(state.configPath, 'utf8'))); }
+          catch (_) { base = state.cfg; }
+        }
+        const prev = state.cfg;
+        const updated = { ...base, ...patch, vaultPath: prev.vaultPath, port: prev.port };
         writeConfigFile(updated, state.configPath);
         state.cfg = updated;
         state.safeConfig = buildSafeConfig(updated);
         state.configVersion += 1;
         serveJson(res, state.safeConfig);
         broadcastEvent(state, 'config', { version: state.configVersion });
-        if (Object.prototype.hasOwnProperty.call(patch, 'ignorePaths') && state.onIgnorePathsChanged) {
+        // Compare against the previous in-memory config (not the patch): a
+        // pending hand edit picked up above can change these too.
+        const ignoreChanged = JSON.stringify(updated.ignorePaths) !== JSON.stringify(prev.ignorePaths);
+        if (ignoreChanged && state.onIgnorePathsChanged) {
           await state.onIgnorePathsChanged();
-        } else if (Object.prototype.hasOwnProperty.call(patch, 'showUnresolvedLinks')) {
+        } else if (updated.showUnresolvedLinks !== prev.showUnresolvedLinks) {
           await rebuildGraphState(state);
           broadcastEvent(state, 'graph', { version: state.graphVersion });
         }
@@ -1509,6 +1688,8 @@ async function startApp(options = {}) {
     }
     const w = chokidar.watch(state.cfg.vaultPath, {
       ignoreInitial: true,
+      // Must match collectMarkdownFiles, which also follows symlinks.
+      followSymlinks: true,
       ignored: chokidarIgnores,
       awaitWriteFinish: { stabilityThreshold: AWAIT_WRITE_FINISH_MS }
     });
@@ -1528,6 +1709,8 @@ async function startApp(options = {}) {
   let rescanChain = Promise.resolve();
   const rescanForIgnorePaths = async () => {
     try { await watcher.close(); } catch (_) {}
+    // Invalidate parses still in flight from the old watcher.
+    state.fsPending = new Map();
     try {
       state.entries = await scanVaultEntries(state.cfg.vaultPath, state.cfg.ignorePaths);
       await rebuild();
@@ -1626,5 +1809,9 @@ module.exports = {
   materializeGraph,
   applyFsEventToState,
   rebuildGraphState,
-  isIgnoredPath
+  isIgnoredPath,
+  isTrustedHost,
+  isJsonContentType,
+  sanitizeCustomPresets,
+  MAX_CUSTOM_PRESETS
 };
