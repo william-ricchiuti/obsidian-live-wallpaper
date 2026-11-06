@@ -24,6 +24,7 @@
     "gl-renderer.js",
     "presets.json",
     "bin/cli.js",
+    "lib/",
     "linux-setup.md",
     "macos-setup.md",
     "windows-setup.md",
@@ -46,7 +47,7 @@
   },
   "scripts": {
     "start": "node parser.js",
-    "smoke": "node scripts/smoke.js",
+    "smoke": "node scripts/smoke.js && node scripts/smoke-install.js",
     "smoke:render": "node scripts/smoke-render.js",
     "test": "npm run smoke && npm run smoke:render",
     "lint": "eslint parser.js bin/cli.js worker.js renderer-core.js layout-core.js gl-renderer.js themes/*.js scripts/*.js eslint.config.js index.html settings.html",

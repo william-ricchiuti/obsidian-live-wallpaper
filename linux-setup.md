@@ -77,6 +77,27 @@ KDE Store first.
 
 ## Autostart the parser (optional)
 
+The easy way: install the CLI globally, then let it register a systemd user
+service for you (run this from the folder where you want the config file to live):
+
+```bash
+npm i -g obsidian-live-wallpaper
+olw install --vault /home/you/path/to/your/vault
+```
+
+It writes the config, then `~/.config/systemd/user/obsidian-live-wallpaper-<id>.service`
+(one per config file, so several vaults can coexist) with `Restart=on-failure`,
+runs `systemctl --user daemon-reload` and `systemctl --user enable --now`, and
+prints the wallpaper URL. Logs: `journalctl --user -u obsidian-live-wallpaper-<id> -f`.
+
+- `olw install --dry-run …` prints the unit and the `systemctl` commands without doing anything.
+- `olw uninstall` (add `--config <file>` if you used one) disables and removes it.
+- `npx obsidian-live-wallpaper install --vault …` also works, but because npx
+  runs from a temporary cache that can be cleared, it stops and asks you to
+  install globally first (`--force` overrides that).
+
+The manual options below do the same thing by hand.
+
 ### Option A: systemd user service
 
 Save this as `~/.config/systemd/user/vault-wallpaper.service`:
