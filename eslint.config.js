@@ -34,7 +34,7 @@ module.exports = [
   },
   {
     // Node/CommonJS: the server, CLI entry, dev/test scripts, and this config.
-    files: ['parser.js', 'bin/cli.js', 'scripts/**/*.js', 'eslint.config.js'],
+    files: ['parser.js', 'bin/cli.js', 'lib/**/*.js', 'scripts/**/*.js', 'eslint.config.js'],
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: 'commonjs',
