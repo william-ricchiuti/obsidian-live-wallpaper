@@ -842,6 +842,38 @@ async function runNewRoutes(tmpRoot) {
   assert(badRotate.statusCode === 400, 'rotate must reject unknown themes');
 }
 
+// Note names, link targets and tags that collide with Object.prototype keys
+// must behave like any other name (lookup tables used to be plain objects).
+async function runPrototypeKeyNames(tmpRoot) {
+  const vaultDir = path.join(tmpRoot, 'proto-vault');
+  writeFile(path.join(vaultDir, 'toString.md'), '#constructor\n');
+  let protoFile = true;
+  try {
+    writeFile(path.join(vaultDir, '__proto__.md'), 'x\n');
+  } catch (_) {
+    protoFile = false; // filesystem refused the name
+  }
+  writeFile(path.join(vaultDir, 'Alpha.md'), '#idea\n[[toString]] [[__proto__]] [[constructor]] [[hasOwnProperty]] `[[valueOf]]`\n');
+  const entries = await scanVaultEntries(vaultDir);
+  const realCount = protoFile ? 3 : 2;
+
+  const g = materializeGraph(entries, vaultDir, { showUnresolvedLinks: true });
+  const real = g.nodes.filter(n => !n.ghost).map(n => n.id).sort();
+  const expectedReal = (protoFile ? ['Alpha', '__proto__', 'toString'] : ['Alpha', 'toString']);
+  assert(JSON.stringify(real) === JSON.stringify(expectedReal), `expected real nodes ${expectedReal}, got ${real}`);
+  const ghosts = g.nodes.filter(n => n.ghost).map(n => n.id).sort();
+  const expectedGhosts = ['constructor', 'hasOwnProperty', 'valueOf'].concat(protoFile ? [] : ['__proto__']).sort();
+  assert(JSON.stringify(ghosts) === JSON.stringify(expectedGhosts), `expected ghosts ${expectedGhosts}, got ${ghosts}`);
+  assert(g.links.length === 5, `expected 5 links from Alpha, got ${g.links.length}`);
+  assert(g.links.every(l => l.source === 'Alpha'), 'expected every link to come from Alpha');
+  assert(g.discoveredTags.constructor === 1 && g.discoveredTags.idea === 1, `expected tag counts, got ${JSON.stringify(g.discoveredTags)}`);
+  assert(g.tagged === 2, `expected 2 tagged notes, got ${g.tagged}`);
+
+  const noGhosts = materializeGraph(entries, vaultDir, { showUnresolvedLinks: false });
+  assert(noGhosts.nodes.length === realCount, `expected ${realCount} nodes without ghosts, got ${noGhosts.nodes.length}`);
+  assert(noGhosts.links.length === realCount - 1, `expected ${realCount - 1} links without ghosts, got ${noGhosts.links.length}`);
+}
+
 async function main() {
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'obsidian-live-wallpaper-smoke-'));
   try {
@@ -868,6 +900,7 @@ async function main() {
     await runSymlinkCycleGuard(tmpRoot);
     await runEaddrinuse(tmpRoot);
     await runLinkResolution(tmpRoot);
+    await runPrototypeKeyNames(tmpRoot);
     await runNewRoutes(tmpRoot);
     console.log('smoke: ok');
   } finally {
